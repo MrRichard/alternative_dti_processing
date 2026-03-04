@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: mrtrix3/mrtrix3:latest
+
+%files
+    process_dti.sh /app/process_dti.sh
+
+%post
+    set -e # Exit on any error
+    echo "INFO: Installing system dependencies..."
+    apt-get update
+    apt-get install -y --no-install-recommends python3 python3-pip
+    rm -rf /var/lib/apt/lists/*
+    echo "INFO: Setting up DTI processing script..."
+    chmod +x /app/process_dti.sh
+
+%environment
+    export PATH="/opt/fsl/bin:$PATH"
+    export FSLDIR="/opt/fsl"
+
+%runscript
+    exec /app/process_dti.sh "$@"

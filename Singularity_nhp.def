@@ -1,0 +1,137 @@
+Bootstrap: docker
+From: mrtrix3/mrtrix3:latest
+
+# -----------------------------------------------------------------------------
+# NHP DTI Processing Container
+#
+# Adds to the base mrtrix3 image:
+#   - ANTs v2.6.5 (precompiled Ubuntu 22.04 / amd64 — compatible with Debian 12)
+#   - process_dti_nhp.sh script
+#
+# The runscript does NOT auto-execute the pipeline. Instead, use:
+#
+#   singularity run \
+#       -B /host/input:/data \
+#       -B /host/output:/out \
+#       Singularity_nhp.sif \
+#       /app/process_dti_nhp.sh \
+#           -a /data/AP_DWI.nii.gz \
+#           -v /data/AP.bvec \
+#           -b /data/AP.bval \
+#           -p /data/PA_DWI.nii.gz \
+#           -t /data/T1w.nii.gz \
+#           -m /data/T1w_brain_mask.nii.gz \
+#           -f /data/FA_template.nii.gz \
+#           -o /out/subject01
+#
+# Or launch an interactive shell:
+#   singularity shell -B /host/input:/data Singularity_nhp.sif
+# -----------------------------------------------------------------------------
+
+%files
+    process_dti_nhp.sh /app/process_dti_nhp.sh
+
+%post
+    set -e
+
+    # -------------------------------------------------------------------------
+    # System dependencies
+    # -------------------------------------------------------------------------
+    echo "INFO: Installing system dependencies..."
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        unzip \
+        wget \
+        ca-certificates
+    rm -rf /var/lib/apt/lists/*
+
+    # -------------------------------------------------------------------------
+    # ANTs v2.6.5 — Ubuntu 22.04 amd64 build
+    # Compatible with the Debian 12 (bookworm) base image.
+    # Ubuntu 22.04 uses glibc 2.35; Debian 12 ships glibc 2.36, so the
+    # binaries run without issues.
+    # -------------------------------------------------------------------------
+    ANTS_VERSION="2.6.5"
+    ANTS_URL="https://github.com/ANTsX/ANTs/releases/download/v${ANTS_VERSION}/ants-${ANTS_VERSION}-ubuntu-22.04-X64-gcc.zip"
+    # NOTE: /opt/ants is already used by the mrtrix3 base image (N4BiasFieldCorrection
+    # only). Full ANTs is installed to /opt/antsx to avoid overwriting that stub.
+    ANTS_INSTALL_DIR="/opt/antsx"
+
+    echo "INFO: Downloading ANTs ${ANTS_VERSION}..."
+    wget -q -O /tmp/ants.zip "${ANTS_URL}"
+
+    echo "INFO: Installing ANTs to ${ANTS_INSTALL_DIR}..."
+    mkdir -p "${ANTS_INSTALL_DIR}"
+    unzip -q /tmp/ants.zip -d /tmp/ants_extracted
+
+    # The zip unpacks to a versioned subdirectory; move its contents into place
+    mv /tmp/ants_extracted/ants-*/bin  "${ANTS_INSTALL_DIR}/bin"
+    mv /tmp/ants_extracted/ants-*/lib  "${ANTS_INSTALL_DIR}/lib"
+
+    rm -rf /tmp/ants.zip /tmp/ants_extracted
+
+    echo "INFO: ANTs installation complete — $(ls ${ANTS_INSTALL_DIR}/bin | wc -l) binaries installed"
+
+    # -------------------------------------------------------------------------
+    # Pipeline script
+    # -------------------------------------------------------------------------
+    echo "INFO: Setting up NHP DTI processing script..."
+    chmod +x /app/process_dti_nhp.sh
+
+%environment
+    # FSL (already present in mrtrix3 base image)
+    export FSLDIR="/opt/fsl"
+    export PATH="/opt/fsl/bin:$PATH"
+
+    # ANTs (installed to /opt/antsx — /opt/ants is reserved by the mrtrix3 base image)
+    export ANTSPATH="/opt/antsx/bin"
+    export PATH="/opt/antsx/bin:$PATH"
+    export LD_LIBRARY_PATH="/opt/antsx/lib:${LD_LIBRARY_PATH:-}"
+
+%runscript
+    # Drop into a shell so the user explicitly invokes the pipeline script.
+    # This avoids accidentally running a long pipeline without the correct
+    # bind mounts or arguments in place.
+    #
+    # Usage:
+    #   singularity run <container> /app/process_dti_nhp.sh [args...]
+    #   singularity run <container> bash            # interactive shell
+    #   singularity run <container> -h              # won't work — pass script first
+    #
+    # If no arguments are given, print a usage reminder.
+
+    if [ "$#" -eq 0 ]; then
+        echo ""
+        echo "NHP DTI Processing Container"
+        echo "============================"
+        echo ""
+        echo "No command given. To run the pipeline:"
+        echo ""
+        echo "  singularity run -B /host/input:/data -B /host/output:/out \\"
+        echo "      $(basename "$SINGULARITY_CONTAINER" 2>/dev/null || echo '<container>.sif') \\"
+        echo "      /app/process_dti_nhp.sh \\"
+        echo "          -a /data/AP_DWI.nii.gz \\"
+        echo "          -v /data/AP.bvec \\"
+        echo "          -b /data/AP.bval \\"
+        echo "          -p /data/PA_DWI.nii.gz \\"
+        echo "          -t /data/T1w.nii.gz \\"
+        echo "          -m /data/T1w_brain_mask.nii.gz \\"
+        echo "          -f /data/FA_template.nii.gz \\"
+        echo "          -o /out/subject01"
+        echo ""
+        echo "  For help: singularity run <container> /app/process_dti_nhp.sh -h"
+        echo "  For a shell: singularity shell <container>"
+        echo ""
+        exit 0
+    fi
+
+    exec "$@"
+
+%labels
+    Maintainer Richard
+    Version 1.0
+    Description NHP DTI pipeline — mrtrix3 + FSL + ANTs SyN normalization
+    ANTs_version 2.6.5
+    Base_image mrtrix3/mrtrix3:latest
