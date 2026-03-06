@@ -3,15 +3,20 @@ From: mrtrix3/mrtrix3:latest
 
 %files
     process_dti.sh /app/process_dti.sh
+    postprocess_streamline_density.py /app/postprocess_streamline_density.py
 
 %post
     set -e # Exit on any error
     echo "INFO: Installing system dependencies..."
     apt-get update
     apt-get install -y --no-install-recommends python3 python3-pip
+    echo "INFO: Installing Python libraries for DIPY post-processing..."
+    python3 -m pip install --no-cache-dir --upgrade pip
+    python3 -m pip install --no-cache-dir numpy scipy nibabel dipy
     rm -rf /var/lib/apt/lists/*
     echo "INFO: Setting up DTI processing script..."
     chmod +x /app/process_dti.sh
+    chmod +x /app/postprocess_streamline_density.py
 
 %environment
     export PATH="/opt/fsl/bin:$PATH"
