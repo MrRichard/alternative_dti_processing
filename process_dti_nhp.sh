@@ -4,18 +4,18 @@
 #
 # Adapted from process_dti.sh for non-human primate data.
 # Key differences from the human pipeline:
-#   - Step 6: Replaces dwi2mask with FLIRT-based coregistration of a T1w brain
-#             mask into DWI space (more robust for NHP brain morphology).
+#   - Step 6: Uses ANTs SyN to register T1w (moving) -> corrected b0 (fixed),
+#             then applies the forward warp to bring the T1w brain mask into
+#             DWI space. More robust for NHP than FLIRT or epi_reg/FAST.
 #   - Step 11: Adds ANTs SyN normalization to warp native DTI maps to a target
 #              FA template for group-level analysis.
 #
 # Requires tools: MRtrix3 (mrconvert, mrinfo, dwidenoise, mrdegibbs,
 #                           dwifslpreproc, dwibiascorrect, dwi2tensor,
 #                           tensor2metric, dwiextract, mrmath, mrcat)
-#                 FSL (flirt — required for T1w mask coregistration)
-#                 ANTs (antsRegistrationSyN.sh, antsApplyTransforms — required)
+#                 FSL (bet, fslmaths -- skull stripping and mask binarisation)
+#                 ANTs (antsRegistrationSyN.sh, antsApplyTransforms -- required)
 #
-# --------------------------------------------------------------------------
 # INPUT DATA NOTES
 # --------------------------------------------------------------------------
 # This pipeline handles multi-shell DWI with b-values: 0, 500, 1000, 2000.
@@ -71,6 +71,10 @@ Optional:
             Check your DICOM header or scanner protocol sheet.
   -s INT    B-value shell to use for DTI tensor fitting [default: 1000]
             Use -s 2000 to fit at the high b-value shell instead.
+  -F FLOAT  BET fractional intensity threshold for b0 skull stripping [default: 0.25]
+            Smaller values extract larger brain volume. NHP range: 0.20-0.35.
+  -G FLOAT  BET vertical gradient in f (-1 to 1) [default: -0.1]
+            Negative shifts centre of gravity inferiorly for NHP brain position.
   -k        Keep intermediate files in <outdir>/tmp/ [default: delete]
   -h        Show this help message
 
@@ -116,9 +120,11 @@ average_or_copy() {
 READOUT_TIME="0.06"
 READOUT_TIME_MANUAL=false
 DTI_SHELL="1000"
+BET_F="0.35"
+BET_G="-0.1"
 KEEP_INTERMEDIATES=false
 
-while getopts "a:v:b:p:o:t:m:f:r:s:kh" opt; do
+while getopts "a:v:b:p:o:t:m:f:r:s:F:G:kh" opt; do
     case "$opt" in
         a) AP_DWI="$OPTARG" ;;
         v) AP_BVEC="$OPTARG" ;;
@@ -130,6 +136,8 @@ while getopts "a:v:b:p:o:t:m:f:r:s:kh" opt; do
         f) FA_TEMPLATE="$OPTARG" ;;
         r) READOUT_TIME="$OPTARG"; READOUT_TIME_MANUAL=true ;;
         s) DTI_SHELL="$OPTARG" ;;
+        F) BET_F="$OPTARG" ;;
+        G) BET_G="$OPTARG" ;;
         k) KEEP_INTERMEDIATES=true ;;
         h) usage ;;
         *) die "Unknown option. Use -h for help." ;;
@@ -212,8 +220,10 @@ for tool in mrconvert mrinfo dwidenoise mrdegibbs dwifslpreproc \
         || die "Required tool not found in PATH: $tool"
 done
 
-command -v flirt >/dev/null 2>&1 \
-    || die "Required tool not found in PATH: flirt (FSL)"
+for tool in bet fslmaths; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || die "Required tool not found in PATH: $tool (FSL)"
+done
 
 command -v antsRegistrationSyN.sh >/dev/null 2>&1 \
     || die "Required tool not found in PATH: antsRegistrationSyN.sh (ANTs)"
@@ -321,15 +331,41 @@ mrconvert "$TMPDIR/ap_preproc.mif" \
 log " Saved preprocessed DWI: ${AP_BASE}_ECC.nii.gz / .bvec / .bval"
 
 # =============================================================================
-# STEP 6: Create brain mask — FLIRT-based T1w mask coregistration
+# STEP 6: Create brain mask — FSL BET on mean corrected b0
 # =============================================================================
-# NHP-specific: dwi2mask performs poorly on NHP brains due to different
-# proportions and skull morphology. Instead, coregister the T1w to the
-# corrected b0 and apply the T1w brain mask to DWI space.
+# NHP-specific: dwi2mask and structural coregistration approaches have proven
+# unreliable for this dataset. FSL BET applied directly to the mean corrected
+# b0 is used instead.
+#
+# Why BET on the b0 (not the T1w or the full DWI):
+#   - The ECC-corrected mean b0 has good SNR and clear brain/background contrast
+#   - Avoids cross-modality registration uncertainty entirely
+#   - Faster and more predictable than ANTs SyN at this stage
+#
+# Why a mask is needed before tensor fitting:
+#   - dwibiascorrect uses the mask to estimate the smooth bias field;
+#     including skull/soft tissue pulls the estimate off for brain voxels
+#   - The FA map fed to ANTs in Step 11 will have artifactual high-FA voxels
+#     at skull interfaces without a mask, degrading template registration
+#
+# NHP BET tuning notes:
+#   -f FLOAT  Fractional intensity threshold (0->1); smaller = larger brain
+#             extract. NHP typically needs 0.20-0.35 (human default is 0.5).
+#   -g FLOAT  Vertical gradient in f (-1->1); negative shifts the centre
+#             of gravity inferiorly to compensate for NHP brain position.
+#             Try -0.05 to -0.15 as a starting point.
+#   -R        Robust iterative re-estimation; recommended when default sphere
+#             initialisation is poor (common in NHP).
+#   -m        Output binary mask file (<out>_mask.nii.gz).
+#
+# These defaults (-f 0.25 -g -0.1 -R) are a reasonable NHP starting point
+# but MUST be inspected and tuned per dataset. Use the -F and -G pipeline
+# flags to override without editing this script.
 # =============================================================================
 log "------------------------------------------------------------"
-log "STEP 6: Creating brain mask via FLIRT coregistration (NHP)"
-log " Coregistering T1w → corrected b0, then applying T1w mask"
+log "STEP 6: Creating brain mask via FSL BET on mean b0 (NHP)"
+log " BET parameters: -f ${BET_F} -g ${BET_G} -R -m"
+log " Override defaults with pipeline flags -F (f threshold) and -G (gradient)"
 
 # 6a: Extract mean corrected b0 from preprocessed DWI
 log " 6a: Extracting mean corrected b0"
@@ -337,31 +373,32 @@ dwiextract -bzero "$TMPDIR/ap_preproc.mif" - | \
     mrmath - mean -axis 3 "$TMPDIR/b0_corrected.mif" -force
 mrconvert "$TMPDIR/b0_corrected.mif" "$TMPDIR/b0_corrected.nii.gz" -force
 
-# 6b: FLIRT — coregister T1w → corrected b0 (cross-modality, 6 DOF)
-log " 6b: FLIRT rigid registration T1w → b0 (mutualinfo, 6 DOF)"
-flirt \
-    -in "$T1W" \
-    -ref "$TMPDIR/b0_corrected.nii.gz" \
-    -omat "$TMPDIR/T1w_to_DWI.mat" \
-    -cost mutualinfo \
-    -dof 6 \
-    -out "$TMPDIR/T1w_in_DWI.nii.gz"
+# 6b: Run BET on the mean b0
+#     -f and -g are set by pipeline flags -F/-G (defaults: 0.25 / -0.1)
+#     -R: robust iterative re-estimation (recommended for NHP)
+#     -m: write binary mask as b0_bet_mask.nii.gz
+log " 6b: Running BET"
+bet \
+    "$TMPDIR/b0_corrected.nii.gz" \
+    "$TMPDIR/b0_bet" \
+    -f "$BET_F" \
+    -g "$BET_G" \
+    -R \
+    -m
 
-# 6c: Apply transform to T1w brain mask (nearest-neighbour to preserve binary)
-log " 6c: Applying transform to T1w brain mask (nearest-neighbour)"
-flirt \
-    -in "$T1W_MASK" \
-    -ref "$TMPDIR/b0_corrected.nii.gz" \
-    -applyxfm \
-    -init "$TMPDIR/T1w_to_DWI.mat" \
-    -interp nearestneighbour \
-    -out "$TMPDIR/brain_mask_DWI.nii.gz"
+# 6c: Binarise mask (BET -m output should already be binary, but enforce it
+#     to guard against any float encoding from older FSL versions)
+log " 6c: Binarising mask"
+fslmaths "$TMPDIR/b0_bet_mask.nii.gz" -bin "$TMPDIR/brain_mask_DWI.nii.gz"
 
-# 6d: Convert mask back to MIF for downstream MRtrix steps
+# 6d: Convert mask to MIF for downstream MRtrix steps
 mrconvert "$TMPDIR/brain_mask_DWI.nii.gz" "$TMPDIR/brain_mask.mif" -force
 
 mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
 log " Saved: ${AP_BASE}_mask.nii.gz"
+log " QC: inspect $TMPDIR/b0_bet.nii.gz and ${AP_BASE}_mask.nii.gz"
+log "     If mask is over/under-inclusive, re-run with adjusted -F and -G flags"
+
 
 # =============================================================================
 # STEP 7: Bias field correction
@@ -493,8 +530,8 @@ log ""
 log " Preprocessed DWI (full multi-shell, native space):"
 log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
-log "   ${AP_BASE}_ECC.bval     b-values"
-log "   ${AP_BASE}_mask.nii.gz  brain mask (from T1w via FLIRT)"
+log "   ${AP_BASE}_ECC.bval     b-values" 
+log "   ${AP_BASE}_mask.nii.gz  brain mask (BET on mean corrected b0)
 log ""
 log " DTI metrics — Native DWI space:"
 log "   ${AP_BASE}_FA.nii.gz     Fractional Anisotropy"
