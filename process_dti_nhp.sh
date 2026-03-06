@@ -4,9 +4,9 @@
 #
 # Adapted from process_dti.sh for non-human primate data.
 # Key differences from the human pipeline:
-#   - Step 6: Uses ANTs SyN to register T1w (moving) -> corrected b0 (fixed),
-#             then applies the forward warp to bring the T1w brain mask into
-#             DWI space. More robust for NHP than FLIRT or epi_reg/FAST.
+#   - Step 4.5: Registers T1w (moving) -> AP b0 (fixed, affine), then brings
+#               the T1w brain mask into DWI space for explicit eddy masking.
+#               This avoids dwifslpreproc auto-generating a mask.
 #   - Step 11: Adds ANTs SyN normalization to warp native DTI maps to a target
 #              FA template for group-level analysis.
 #
@@ -80,7 +80,7 @@ Optional:
 
 Outputs (in <outdir>/):
   <apbase>_ECC.{nii.gz,bvec,bval}     — preprocessed full multi-shell DWI
-  <apbase>_mask.nii.gz                 — brain mask in DWI space (from T1w)
+  <apbase>_mask.nii.gz                 — brain mask in DWI space (BET on mean corrected b0)
   <apbase>_{FA,MD,AD,RD}.nii.gz       — DTI maps in native DWI space
   w<apbase>_{FA,MD,AD,RD}.nii.gz      — DTI maps warped to FA template space
   pipeline.log                         — full processing log
@@ -120,7 +120,7 @@ average_or_copy() {
 READOUT_TIME="0.06"
 READOUT_TIME_MANUAL=false
 DTI_SHELL="1000"
-BET_F="0.35"
+BET_F="0.25"
 BET_G="-0.1"
 KEEP_INTERMEDIATES=false
 
@@ -298,11 +298,45 @@ mrcat "$TMPDIR/b0_AP.mif" "$TMPDIR/b0_PA.mif" \
 log " SE-EPI pair dimensions: $(mrinfo -size "$TMPDIR/se_epi_pair.mif")"
 
 # =============================================================================
+# STEP 4.5: Build explicit eddy mask from native T1w mask
+# =============================================================================
+log "------------------------------------------------------------"
+log "STEP 4.5: Preparing eddy mask from T1w brain mask"
+log " Registering T1w -> AP b0 (affine) and resampling T1w mask into DWI space"
+
+# Convert AP b0 to NIfTI reference for ANTs
+mrconvert "$TMPDIR/b0_AP.mif" "$TMPDIR/b0_AP.nii.gz" -force
+
+# Fast affine cross-modality registration for eddy masking
+antsRegistrationSyN.sh \
+    -d 3 \
+    -f "$TMPDIR/b0_AP.nii.gz" \
+    -m "$T1W" \
+    -o "$TMPDIR/t1_to_apb0_" \
+    -t a
+
+# Bring T1w brain mask into AP DWI space with nearest-neighbor interpolation
+antsApplyTransforms \
+    -d 3 \
+    -i "$T1W_MASK" \
+    -r "$TMPDIR/b0_AP.nii.gz" \
+    -t "$TMPDIR/t1_to_apb0_0GenericAffine.mat" \
+    -o "$TMPDIR/eddy_mask_from_t1.nii.gz" \
+    -n NearestNeighbor
+
+# Enforce strict binary mask and convert to MIF for dwifslpreproc
+fslmaths "$TMPDIR/eddy_mask_from_t1.nii.gz" -bin "$TMPDIR/eddy_mask_from_t1_bin.nii.gz"
+mrconvert "$TMPDIR/eddy_mask_from_t1_bin.nii.gz" "$TMPDIR/eddy_mask_from_t1.mif" -force
+
+log " Prepared eddy mask: $TMPDIR/eddy_mask_from_t1_bin.nii.gz"
+
+# =============================================================================
 # STEP 5: Distortion + eddy current correction
 # =============================================================================
 log "------------------------------------------------------------"
 log "STEP 5: Distortion and eddy current correction"
 log " Uses FSL topup (susceptibility) + eddy (eddy currents, motion)"
+log " Using explicit eddy mask from T1w (prevents internal auto-mask generation)"
 log " This step typically takes 30–90 minutes depending on data size."
 log ""
 log " IMPORTANT: -pe_dir AP assumes your AP series is j- phase-encoded"
@@ -316,6 +350,7 @@ dwifslpreproc \
     -se_epi "$TMPDIR/se_epi_pair.mif" \
     -pe_dir AP \
     -readout_time "$READOUT_TIME" \
+    -eddy_mask "$TMPDIR/eddy_mask_from_t1.mif" \
     -eddy_options "--slm=linear --data_is_shelled" \
     -force
 
@@ -531,7 +566,7 @@ log " Preprocessed DWI (full multi-shell, native space):"
 log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
 log "   ${AP_BASE}_ECC.bval     b-values" 
-log "   ${AP_BASE}_mask.nii.gz  brain mask (BET on mean corrected b0)
+log "   ${AP_BASE}_mask.nii.gz  brain mask (BET on mean corrected b0)"
 log ""
 log " DTI metrics — Native DWI space:"
 log "   ${AP_BASE}_FA.nii.gz     Fractional Anisotropy"
