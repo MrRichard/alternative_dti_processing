@@ -307,7 +307,10 @@ log " Registering T1w -> AP b0 (affine) and resampling T1w mask into DWI space"
 # Convert AP b0 to NIfTI reference for ANTs
 mrconvert "$TMPDIR/b0_AP.mif" "$TMPDIR/b0_AP.nii.gz" -force
 
+# DOES NOT WORK 
+# - FSL FLIRT with -cost 
 # Fast affine cross-modality registration for eddy masking
+# antsIntermodalityIntrasubject.sh -
 antsRegistrationSyN.sh \
     -d 3 \
     -f "$TMPDIR/b0_AP.nii.gz" \
@@ -315,6 +318,7 @@ antsRegistrationSyN.sh \
     -o "$TMPDIR/t1_to_apb0_" \
     -t a
 
+# DOES NOT WORK
 # Bring T1w brain mask into AP DWI space with nearest-neighbor interpolation
 antsApplyTransforms \
     -d 3 \
@@ -343,6 +347,8 @@ log " IMPORTANT: -pe_dir AP assumes your AP series is j- phase-encoded"
 log " (anterior → posterior). Verify with mrinfo or your scanner protocol."
 log " If your AP direction is actually PA (posterior → anterior), swap to -pe_dir PA."
 
+# Here is the problem areas
+# -eddy_mask needs a nhp mask
 dwifslpreproc \
     "$TMPDIR/ap_degibbs.mif" \
     "$TMPDIR/ap_preproc.mif" \
