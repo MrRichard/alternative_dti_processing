@@ -33,6 +33,7 @@ From: mrtrix3/mrtrix3:latest
 
 %files
     process_dti_nhp.sh /app/process_dti_nhp.sh
+    linux_afni.tgz /tmp/linux_afni.tgz
 
 %post
     set -e
@@ -86,19 +87,16 @@ From: mrtrix3/mrtrix3:latest
     echo "INFO: ANTs installation complete — $(ls ${ANTS_INSTALL_DIR}/bin | wc -l) binaries installed"
 
     # -------------------------------------------------------------------------
-    # AFNI — pre-built binary tarball (linux_afni.tgz)
+    # AFNI — extracted from pre-copied linux_afni.tgz (%files section)
     # Required for: 3dSkullStrip -monkey, 3dmask_tool, 3dmaskave, 3dcalc
     # Used by the -M afni mask method and by -M hd-bet / -M deepbet post-processing.
-    # The server does a meta-refresh redirect + cookie gate; wget handles both.
+    # The tarball is host-side downloaded and included via %files to avoid
+    # the AFNI cookie-gate download that blocks wget/curl in the build sandbox.
     # -------------------------------------------------------------------------
-    echo "INFO: Installing AFNI..."
-    AFNI_TMP_DIR=$(mktemp -d)
-    wget --no-check-certificate -q -O "${AFNI_TMP_DIR}/linux_afni.tgz" \
-        "https://afni.nimh.nih.gov/pub/dist/tgz/linux_afni.tgz"
-    tar -C "${AFNI_TMP_DIR}" -xzf "${AFNI_TMP_DIR}/linux_afni.tgz"
-    # The tarball unpacks as AFNI_v<version>; move to /opt/afni
-    mv "${AFNI_TMP_DIR}"/AFNI_v* /opt/afni
-    rm -rf "${AFNI_TMP_DIR}"
+    echo "INFO: Installing AFNI (from pre-copied tarball)..."
+    mkdir -p /opt/afni
+    tar -C /opt/afni --strip-components=1 -xzf /tmp/linux_afni.tgz
+    rm -f /tmp/linux_afni.tgz
     echo "INFO: AFNI installed — $(ls /opt/afni/bin | wc -l) binaries"
 
     # -------------------------------------------------------------------------
