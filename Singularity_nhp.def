@@ -89,11 +89,12 @@ From: mrtrix3/mrtrix3:latest
     # AFNI — pre-built binary tarball (linux_afni.tgz)
     # Required for: 3dSkullStrip -monkey, 3dmask_tool, 3dmaskave, 3dcalc
     # Used by the -M afni mask method and by -M hd-bet / -M deepbet post-processing.
+    # The server does a meta-refresh redirect + cookie gate; wget handles both.
     # -------------------------------------------------------------------------
     echo "INFO: Installing AFNI..."
     AFNI_TMP_DIR=$(mktemp -d)
-    curl -sSL -o "${AFNI_TMP_DIR}/linux_afni.tgz" \
-        https://afni.nimh.nih.gov/pub/dist/tgz/linux_afni.tgz
+    wget --no-check-certificate -q -O "${AFNI_TMP_DIR}/linux_afni.tgz" \
+        "https://afni.nimh.nih.gov/pub/dist/tgz/linux_afni.tgz"
     tar -C "${AFNI_TMP_DIR}" -xzf "${AFNI_TMP_DIR}/linux_afni.tgz"
     # The tarball unpacks as AFNI_v<version>; move to /opt/afni
     mv "${AFNI_TMP_DIR}"/AFNI_v* /opt/afni
