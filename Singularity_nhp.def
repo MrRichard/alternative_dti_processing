@@ -86,20 +86,19 @@ From: mrtrix3/mrtrix3:latest
     echo "INFO: ANTs installation complete — $(ls ${ANTS_INSTALL_DIR}/bin | wc -l) binaries installed"
 
     # -------------------------------------------------------------------------
-    # AFNI — official installer script (non-interactive)
+    # AFNI — pre-built binary tarball (linux_afni.tgz)
     # Required for: 3dSkullStrip -monkey, 3dmask_tool, 3dmaskave, 3dcalc
     # Used by the -M afni mask method and by -M hd-bet / -M deepbet post-processing.
     # -------------------------------------------------------------------------
     echo "INFO: Installing AFNI..."
-    export AFNI_DECONFLICT=OVERWRITE
-    @afni.install -y -install
-
-    # Verify AFNI tools are accessible
-    echo "INFO: AFNI version: $(3dver -short 2>/dev/null || echo 'installed')"
-    echo "INFO: AFNI tool check:"
-    for tool in 3dSkullStrip 3dmask_tool 3dmaskave 3dcalc; do
-        echo "  - $tool: $(command -v $tool >/dev/null 2>&1 && echo 'OK' || echo 'MISSING')"
-    done
+    AFNI_TMP_DIR=$(mktemp -d)
+    curl -sSL -o "${AFNI_TMP_DIR}/linux_afni.tgz" \
+        https://afni.nimh.nih.gov/pub/dist/tgz/linux_afni.tgz
+    tar -C "${AFNI_TMP_DIR}" -xzf "${AFNI_TMP_DIR}/linux_afni.tgz"
+    # The tarball unpacks as AFNI_v<version>; move to /opt/afni
+    mv "${AFNI_TMP_DIR}"/AFNI_v* /opt/afni
+    rm -rf "${AFNI_TMP_DIR}"
+    echo "INFO: AFNI installed — $(ls /opt/afni/bin | wc -l) binaries"
 
     # -------------------------------------------------------------------------
     # HD-BET — deep learning brain extraction (Python pip)
@@ -138,7 +137,7 @@ WRAPPER
 
     # AFNI
     export AFNI_DECONFLICT=OVERWRITE
-    export PATH="/usr/lib/afni/bin:$PATH"
+    export PATH="/opt/afni/bin:$PATH"
 
     # ANTs (installed to /opt/antsx — /opt/ants is reserved by the mrtrix3 base image)
     export ANTSPATH="/opt/antsx/bin"
