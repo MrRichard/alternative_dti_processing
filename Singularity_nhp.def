@@ -6,10 +6,14 @@ From: mrtrix3/mrtrix3:latest
 #
 # Adds to the base mrtrix3 image:
 #   - ANTs v2.6.5 (precompiled Ubuntu 22.04 / amd64 — compatible with Debian 12)
-#   - AFNI (for 3dSkullStrip -monkey and mask post-processing)
-#   - HD-BET (deep learning brain extraction, Python pip package)
-#   - DeepBet (NHP-specific U-Net brain extraction)
 #   - process_dti_nhp.sh script
+#
+# AFNI skull-stripping is NOT included in this container.
+# For NHP data requiring manual brain extraction, use the -m / -c workflow:
+#   1. Run with -m: pipeline stops after ECC, generates an AFNI mask script
+#   2. Run the AFNI script on a cluster with AFNI installed
+#   3. Resume with -c pointing to the resulting mask
+# See the process_dti.sh usage for the full workflow.
 #
 # The runscript does NOT auto-execute the pipeline. Instead, use:
 #
@@ -22,9 +26,6 @@ From: mrtrix3/mrtrix3:latest
 #           -v /data/AP.bvec \
 #           -b /data/AP.bval \
 #           -p /data/PA_DWI.nii.gz \
-#           -t /data/T1w.nii.gz \
-#           -m /data/T1w_brain_mask.nii.gz \
-#           -f /data/FA_template.nii.gz \
 #           -o /out/subject01
 #
 # Or launch an interactive shell:
@@ -33,7 +34,6 @@ From: mrtrix3/mrtrix3:latest
 
 %files
     process_dti_nhp.sh /app/process_dti_nhp.sh
-    linux_afni.tgz /tmp/linux_afni.tgz
 
 %post
     set -e
@@ -62,8 +62,6 @@ From: mrtrix3/mrtrix3:latest
     # -------------------------------------------------------------------------
     # ANTs v2.6.5 — Ubuntu 22.04 amd64 build
     # Compatible with the Debian 12 (bookworm) base image.
-    # Ubuntu 22.04 uses glibc 2.35; Debian 12 ships glibc 2.36, so the
-    # binaries run without issues.
     # -------------------------------------------------------------------------
     ANTS_VERSION="2.6.5"
     ANTS_URL="https://github.com/ANTsX/ANTs/releases/download/v${ANTS_VERSION}/ants-${ANTS_VERSION}-ubuntu-22.04-X64-gcc.zip"
@@ -87,41 +85,13 @@ From: mrtrix3/mrtrix3:latest
     echo "INFO: ANTs installation complete — $(ls ${ANTS_INSTALL_DIR}/bin | wc -l) binaries installed"
 
     # -------------------------------------------------------------------------
-    # AFNI — extracted from pre-copied linux_afni.tgz (%files section)
-    # Required for: 3dSkullStrip -monkey, 3dmask_tool, 3dmaskave, 3dcalc
-    # Used by the -M afni mask method and by -M hd-bet / -M deepbet post-processing.
-    # The tarball is host-side downloaded and included via %files to avoid
-    # the AFNI cookie-gate download that blocks wget/curl in the build sandbox.
+    # AFNI — NOT installed in this container
+    # For NHP brain extraction, use the -m / -c workflow documented in process_dti.sh:
+    #   Step 1: Run with -m → generates ${AP_BASE}_make_mask.sh
+    #   Step 2: Run that script on a cluster with AFNI installed
+    #   Step 3: Resume with -c pointing to the output mask
     # -------------------------------------------------------------------------
-    echo "INFO: Installing AFNI (from pre-copied tarball)..."
-    mkdir -p /opt/afni
-    tar -C /opt/afni --strip-components=1 -xzf /tmp/linux_afni.tgz
-    rm -f /tmp/linux_afni.tgz
-    echo "INFO: AFNI installed — $(ls /opt/afni/bin | wc -l) binaries"
-
-    # -------------------------------------------------------------------------
-    # HD-BET — deep learning brain extraction (Python pip)
-    # -------------------------------------------------------------------------
-    echo "INFO: Installing HD-BET..."
-    pip3 install --no-cache-dir hd-bet
-
-    # -------------------------------------------------------------------------
-    # DeepBet — NHP-specific U-Net brain extraction
-    # Clone the HumanBrainED/NHP-BrainExtraction repo and install
-    # -------------------------------------------------------------------------
-    echo "INFO: Installing DeepBet (NHP Brain Extraction)..."
-    DEEPBET_DIR="/opt/deepbet"
-    git clone --depth 1 https://github.com/HumanBrainED/NHP-BrainExtraction.git "${DEEPBET_DIR}"
-    pip3 install --no-cache-dir "${DEEPBET_DIR}"
-    # Create a lightweight wrapper script as 'deepbet' entry point
-    cat > /usr/local/bin/deepbet << 'WRAPPER'
-#!/bin/bash
-# Lightweight wrapper: invokes the deepbet Python module
-python3 -m deepbet "$@"
-WRAPPER
-    chmod +x /usr/local/bin/deepbet
-    rm -rf "${DEEPBET_DIR}"
-    echo "INFO: DeepBet installed."
+    echo "INFO: AFNI is not installed (see -m/-c workflow in process_dti.sh)"
 
     # -------------------------------------------------------------------------
     # Pipeline script
@@ -134,17 +104,10 @@ WRAPPER
     export FSLDIR="/opt/fsl"
     export PATH="/opt/fsl/bin:$PATH"
 
-    # AFNI
-    export AFNI_DECONFLICT=OVERWRITE
-    export PATH="/opt/afni/bin:$PATH"
-
     # ANTs (installed to /opt/antsx — /opt/ants is reserved by the mrtrix3 base image)
     export ANTSPATH="/opt/antsx/bin"
     export PATH="/opt/antsx/bin:$PATH"
     export LD_LIBRARY_PATH="/opt/antsx/lib:${LD_LIBRARY_PATH:-}"
-
-    # Python packages
-    export PATH="/usr/local/bin:$PATH"
 
 %runscript
     # Drop into a shell so the user explicitly invokes the pipeline script.
@@ -154,7 +117,6 @@ WRAPPER
     # Usage:
     #   singularity run <container> /app/process_dti_nhp.sh [args...]
     #   singularity run <container> bash            # interactive shell
-    #   singularity run <container> -h              # won't work — pass script first
     #
     # If no arguments are given, print a usage reminder.
 
@@ -172,9 +134,6 @@ WRAPPER
         echo "          -v /data/AP.bvec \\"
         echo "          -b /data/AP.bval \\"
         echo "          -p /data/PA_DWI.nii.gz \\"
-        echo "          -t /data/T1w.nii.gz \\"
-        echo "          -m /data/T1w_brain_mask.nii.gz \\"
-        echo "          -f /data/FA_template.nii.gz \\"
         echo "          -o /out/subject01"
         echo ""
         echo "  For help: singularity run <container> /app/process_dti_nhp.sh -h"
@@ -187,7 +146,7 @@ WRAPPER
 
 %labels
     Maintainer Richard
-    Version 2.0
-    Description NHP DTI pipeline — mrtrix3 + FSL + ANTs + AFNI + HD-BET + DeepBet
+    Version 2.1
+    Description NHP DTI pipeline — MRtrix3 + FSL + ANTs (AFNI not included)
     ANTs_version 2.6.5
     Base_image mrtrix3/mrtrix3:latest
