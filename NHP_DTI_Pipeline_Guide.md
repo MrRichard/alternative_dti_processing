@@ -334,26 +334,26 @@ stripping — more reliable than a single mean b0.
 
 ```bash
 3dSkullStrip -input ecc_mean.nii.gz -prefix skullstrip_mask.nii.gz \
-             -monkey -mask_vol yes -overwrite
+             -monkey -mask_vol -overwrite
 ```
 
 **3dSkullStrip** extracts the brain using a deformable surface model.
 
 - `-monkey` — preset that adapts the surface-expansion parameters to non-human primate
   brain size and EPI contrast.
-- `-mask_vol yes` — outputs a mask volume rather than the extracted (intensity) brain.
+- `-mask_vol` — outputs a mask volume rather than the extracted (intensity) brain. This
+  flag takes no argument.
 
-### 6c — Binarise, dilate, and convert to MIF
+### 6c — Binarise and convert to MIF
 
 ```bash
-fslmaths skullstrip_mask.nii.gz -bin -dilM brain_mask_DWI.nii.gz -odt char
+fslmaths skullstrip_mask.nii.gz -bin brain_mask_DWI.nii.gz -odt char
 mrconvert brain_mask_DWI.nii.gz brain_mask.mif
 ```
 
-- `-bin` — collapses the mask to strictly 0/1.
-- `-dilM` — dilates the mask by **one voxel** (a 3×3×3 mean dilation), so it comfortably
-  covers the cortical edge without clipping. Note that `fslmaths` cannot write MRtrix
-  `.mif`, so the binarised/dilated mask is written as NIfTI and then imported.
+- `-bin` — collapses the mask to strictly 0/1. The raw `3dSkullStrip` mask is used as-is;
+  no dilation or erosion is applied. Note that `fslmaths` cannot write MRtrix `.mif`, so
+  the binarised mask is written as NIfTI and then imported.
 - `mrconvert` brings the mask into MIF for the downstream MRtrix3 steps. A copy is also
   saved to the output directory as `AP_BASE_mask.nii.gz`.
 
@@ -546,7 +546,7 @@ All outputs appear in the directory you specified with `-o`.
 | `<AP_BASE>_ECC.nii.gz` | Full preprocessed multi-shell DWI (all b-values) |
 | `<AP_BASE>_ECC.bvec` | Eddy-rotated gradient directions |
 | `<AP_BASE>_ECC.bval` | B-values |
-| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (AFNI `3dSkullStrip -monkey`, 1-voxel dilated) |
+| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (AFNI `3dSkullStrip -monkey`, raw mask) |
 | `<AP_BASE>_FA.nii.gz` | Fractional Anisotropy |
 | `<AP_BASE>_MD.nii.gz` | Mean Diffusivity |
 | `<AP_BASE>_AD.nii.gz` | Axial Diffusivity |

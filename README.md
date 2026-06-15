@@ -40,8 +40,8 @@ from the `-S` flag:
 - **`-S human`** (default): MRtrix3 `dwi2mask` on the preprocessed DWI.
 - **`-S nhp`**: FSL averages the full eddy-corrected (ECC) series into one
   volume, AFNI `3dSkullStrip -monkey` extracts the brain (a preset tuned for
-  NHP EPI contrast), and the mask is binarised and dilated by **one voxel** so
-  it comfortably covers the cortical edge.
+  NHP EPI contrast). The raw mask is used as-is (binarised only — no
+  dilation or erosion).
 
 This single mask then drives bias correction, tensor fitting, and metric
 extraction — there is no separate `bet`/`dwi2mask` call downstream.
@@ -75,7 +75,7 @@ Required:
 
 Optional:
   -S SPEC   Species / masking: 'human' (dwi2mask) or 'nhp'
-            (AFNI 3dSkullStrip -monkey + 1-voxel dilation)   [default: human]
+            (AFNI 3dSkullStrip -monkey, raw mask)            [default: human]
   -f FILE   FA template (NIfTI) → also warp DTI maps to template via ANTs SyN
   -r FLOAT  Total EPI readout time (s)   [default: 0.06 or JSON sidecar]
   -s INT    DTI shell for tensor fitting [default: 1000]

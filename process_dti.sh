@@ -7,9 +7,9 @@
 # Species-aware brain masking (-S flag):
 #   -S human  (default) — MRtrix3 dwi2mask on the preprocessed DWI
 #   -S nhp              — FSL mean of the ECC series, then AFNI 3dSkullStrip
-#                         with the -monkey preset, binarised and dilated by
-#                         one voxel. Use this for non-human primate / monkey
-#                         data, where dwi2mask and BET are unreliable.
+#                         with the -monkey preset (raw mask, binarised only).
+#                         Use this for non-human primate / monkey data, where
+#                         dwi2mask and BET are unreliable.
 #
 # Optional template normalisation (-f flag):
 #   Provide an FA template to additionally warp the native DTI maps into
@@ -69,7 +69,7 @@ Required:
 Optional:
   -S SPEC   Species / masking strategy: 'human' or 'nhp' [default: human]
               human — MRtrix3 dwi2mask
-              nhp   — FSL mean + AFNI 3dSkullStrip -monkey + 1-voxel dilation
+              nhp   — FSL mean + AFNI 3dSkullStrip -monkey (raw mask)
                       (recommended for monkey/NHP data)
   -f FILE   FA template (NIfTI). If given, native DTI maps are additionally
             warped to this template with ANTs SyN (any species).
@@ -462,11 +462,12 @@ else
     if [[ "$SPECIES" = "nhp" ]]; then
 
         # NHP: FSL averages the full ECC series, AFNI 3dSkullStrip extracts the
-        # brain with its -monkey preset (tuned for NHP EPI contrast), then the
-        # mask is binarised and dilated by one voxel. dwi2mask and FSL BET have
-        # both proven unreliable on this data, so AFNI is used instead.
+        # brain with its -monkey preset (tuned for NHP EPI contrast), and the
+        # raw mask is used as-is (binarised only — no dilation/erosion).
+        # dwi2mask and FSL BET have both proven unreliable on this data, so
+        # AFNI is used instead.
         log "------------------------------------------------------------"
-        log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey + dilate) [nhp]"
+        log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey) [nhp]"
 
         # 6a. Average the eddy-corrected DWI series into a single 3D volume (FSL).
         log " 6a: Averaging ECC series with fslmaths -Tmean"
@@ -483,16 +484,17 @@ else
             -mask_vol \
             -overwrite
 
-        # 6c. Binarize and dilate slightly (1-voxel kernel). NOTE: fslmaths
-        #     cannot write MRtrix .mif — keep this output as NIfTI, then import.
-        log " 6c: Binarising + dilating mask (fslmaths -bin -dilM)"
-        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -dilM \
+        # 6c. Binarize the raw skull-strip mask (no dilation/erosion). NOTE:
+        #     fslmaths cannot write MRtrix .mif — keep this output as NIfTI,
+        #     then import.
+        log " 6c: Binarising mask (fslmaths -bin)"
+        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin \
             "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
 
         mrconvert "$TMPDIR/brain_mask_DWI.nii.gz" "$TMPDIR/brain_mask.mif" -force
         mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
 
-        log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, 1-voxel dilated)"
+        log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, raw mask)"
         log " QC: inspect $TMPDIR/ecc_mean.nii.gz and ${AP_BASE}_mask.nii.gz"
 
     else
@@ -649,7 +651,7 @@ log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
 log "   ${AP_BASE}_ECC.bval     b-values"
 if [[ "$SPECIES" = "nhp" ]]; then
-    log "   ${AP_BASE}_mask.nii.gz  brain mask (AFNI 3dSkullStrip -monkey, 1-voxel dilated)"
+    log "   ${AP_BASE}_mask.nii.gz  brain mask (AFNI 3dSkullStrip -monkey, raw)"
 else
     log "   ${AP_BASE}_mask.nii.gz  brain mask (MRtrix3 dwi2mask)"
 fi

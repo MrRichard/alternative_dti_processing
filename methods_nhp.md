@@ -52,10 +52,9 @@ data. Instead, a mask was derived directly from the corrected diffusion data:
    brain/background contrast.
 2. The mean volume was skull-stripped with AFNI `3dSkullStrip` using the
    `-monkey` preset, which is tuned for non-human primate EPI contrast
-   (`-mask_vol yes`).
-3. The resulting mask was binarised and dilated by one voxel
-   (`fslmaths -bin -dilM`) so that it comfortably covered the cortical edge
-   without clipping.
+   (`-mask_vol`).
+3. The resulting mask was binarised (`fslmaths -bin`) and used as-is, with no
+   morphological dilation or erosion.
 
 This single brain mask was used for all subsequent steps (bias-field
 estimation, tensor fitting, and metric extraction). Masks were visually
