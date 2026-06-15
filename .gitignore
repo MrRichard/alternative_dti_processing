@@ -1,3 +1,5 @@
 *.sif
+*.sif.bak
+*.sif.bak2
 AGENTS.md
 CLAUDE.md

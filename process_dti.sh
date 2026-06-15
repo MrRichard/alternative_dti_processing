@@ -3,11 +3,26 @@
 # process_dti.sh — DTI Processing Pipeline for Multi-shell AP/PA Acquisition
 #
 # Designed to run inside the MRtrix3 Singularity container.
-# Requires tools: MRtrix3 (mrconvert, dwidenoise, mrdegibbs, dwifslpreproc,
-#                           dwibiascorrect, dwi2tensor, tensor2metric,
-#                           dwiextract, mrmath, mrcat)
-#                 FSL (fslmaths — available in container)
-#                 AFNI (3dSkullStrip — required for NHP brain masking)
+#
+# Species-aware brain masking (-S flag):
+#   -S human  (default) — MRtrix3 dwi2mask on the preprocessed DWI
+#   -S nhp              — FSL mean of the ECC series, then AFNI 3dSkullStrip
+#                         with the -monkey preset, binarised and dilated by
+#                         one voxel. Use this for non-human primate / monkey
+#                         data, where dwi2mask and BET are unreliable.
+#
+# Optional template normalisation (-f flag):
+#   Provide an FA template to additionally warp the native DTI maps into
+#   template space with ANTs SyN (works for either species).
+#
+# Requires tools: MRtrix3 (mrconvert, mrinfo, dwidenoise, mrdegibbs,
+#                           dwifslpreproc, dwibiascorrect, dwi2mask,
+#                           dwi2tensor, tensor2metric, dwiextract,
+#                           mrmath, mrcat)
+#                 FSL  (fslmaths — ECC averaging and mask binarisation)
+#                 AFNI (3dSkullStrip — only when -S nhp)
+#                 ANTs (antsRegistrationSyN.sh, antsApplyTransforms —
+#                       only when -f is supplied)
 #
 # ------------------------------------------------------------------------------------------------------------------------------------------
 # INPUT DATA NOTES
@@ -28,7 +43,8 @@
 #       -v AP.bvec           \
 #       -b AP.bval           \
 #       -p PA_DWI.nii.gz     \
-#       -o output_dir
+#       -o output_dir        \
+#       -S nhp                  # for monkey data (default: human)
 
 set -euo pipefail
 
@@ -39,7 +55,7 @@ set -euo pipefail
 usage() {
     cat <<EOF
 
-DTI Processing Pipeline — Multi-shell AP/PA DWI Data
+DTI Processing Pipeline — Multi-shell AP/PA DWI Data (human + NHP)
 
 Usage: $(basename "$0") [OPTIONS]
 
@@ -51,6 +67,12 @@ Required:
   -o DIR    Output directory (created if it does not exist)
 
 Optional:
+  -S SPEC   Species / masking strategy: 'human' or 'nhp' [default: human]
+              human — MRtrix3 dwi2mask
+              nhp   — FSL mean + AFNI 3dSkullStrip -monkey + 1-voxel dilation
+                      (recommended for monkey/NHP data)
+  -f FILE   FA template (NIfTI). If given, native DTI maps are additionally
+            warped to this template with ANTs SyN (any species).
   -r FLOAT  Total EPI readout time in seconds [default: 0.06]
             If not specified, the value is read from the AP DWI JSON sidecar
             (TotalReadoutTime field) when present, otherwise 0.06 is used.
@@ -68,6 +90,7 @@ Outputs (in <outdir>/):
   <apbase>_ECC.{nii.gz,bvec,bval}     — preprocessed full multi-shell DWI
   <apbase>_mask.nii.gz                — binary brain mask (1=inside, 0=outside)
   <apbase>_{FA,MD,AD,RD}.nii.gz       — DTI maps in native DWI space
+  w<apbase>_ECC_{FA,MD,AD,RD}.nii.gz  — (with -f) DTI maps in template space
   pipeline.log                         — full processing log
 
 EOF
@@ -105,16 +128,20 @@ average_or_copy() {
 READOUT_TIME="0.06"
 READOUT_TIME_MANUAL=false
 DTI_SHELL="1000"
+SPECIES="human"
+FA_TEMPLATE=""
 KEEP_INTERMEDIATES=false
 ECC_MASK=""
 
-while getopts "a:v:b:p:o:r:s:c:kth" opt; do
+while getopts "a:v:b:p:o:S:f:r:s:c:kh" opt; do
     case "$opt" in
         a) AP_DWI="$OPTARG" ;;
         v) AP_BVEC="$OPTARG" ;;
         b) AP_BVAL="$OPTARG" ;;
         p) PA_DWI="$OPTARG" ;;
         o) OUTDIR="$OPTARG" ;;
+        S) SPECIES="$OPTARG" ;;
+        f) FA_TEMPLATE="$OPTARG" ;;
         r) READOUT_TIME="$OPTARG"; READOUT_TIME_MANUAL=true ;;
         s) DTI_SHELL="$OPTARG" ;;
         c) ECC_MASK="$OPTARG" ;;
@@ -135,9 +162,22 @@ done
 [[ -f "$AP_BVAL" ]] || die "AP bval not found: $AP_BVAL"
 [[ -f "$PA_DWI"  ]] || die "PA DWI not found: $PA_DWI"
 
+# Validate species
+case "$SPECIES" in
+    human|nhp) ;;
+    *) die "Invalid -S species '$SPECIES'. Use 'human' or 'nhp'." ;;
+esac
+
 # Validate mask-related arguments
 if [[ -n "$ECC_MASK" && ! -f "$ECC_MASK" ]]; then
     die "Pre-made brain mask not found: $ECC_MASK"
+fi
+
+# Validate FA template (template-space warping)
+WARP_TO_TEMPLATE=false
+if [[ -n "$FA_TEMPLATE" ]]; then
+    [[ -f "$FA_TEMPLATE" ]] || die "FA template not found: $FA_TEMPLATE"
+    WARP_TO_TEMPLATE=true
 fi
 
 # Derive base filename from AP DWI input (strip path and .nii/.nii.gz extension)
@@ -184,10 +224,10 @@ if [[ -n "$ECC_MASK" ]]; then
     ECC_BVAL="$OUTDIR/${AP_BASE}_ECC.bval"
 
     if [[ ! -f "$ECC_NII" ]]; then
-        die "Cannot resume: ${ECC_NII} not found. Run with -m first to generate the ECC output, then create a brain mask and rerun with -c."
+        die "Cannot resume: ${ECC_NII} not found. Run the pipeline once to generate the ECC output, then create a brain mask and rerun with -c."
     fi
-    [[ -f "$ECC_BVEC" ]] || die "Cannot resume: ${ECC_BVEC} not found. Run with -m first."
-    [[ -f "$ECC_BVAL" ]] || die "Cannot resume: ${ECC_BVAL} not found. Run with -m first."
+    [[ -f "$ECC_BVEC" ]] || die "Cannot resume: ${ECC_BVEC} not found. Run the pipeline once first."
+    [[ -f "$ECC_BVAL" ]] || die "Cannot resume: ${ECC_BVAL} not found. Run the pipeline once first."
 
     RESUME_FROM_MASK=true
 fi
@@ -203,8 +243,10 @@ log " AP bvec              : $AP_BVEC"
 log " AP bval              : $AP_BVAL"
 log " PA DWI (topup)       : $PA_DWI"
 log " Output directory     : $OUTDIR"
+log " Species / masking    : $SPECIES"
 log " EPI readout time     : ${READOUT_TIME}s  [source: ${READOUT_TIME_SOURCE}]"
 log " DTI shell            : b=${DTI_SHELL}"
+log " Template warp (-f)   : $([[ "$WARP_TO_TEMPLATE" = true ]] && echo "YES (${FA_TEMPLATE})" || echo "no")"
 log " Keep intermediates   : $KEEP_INTERMEDIATES"
 if [[ "$RESUME_FROM_MASK" = true ]]; then
     log " Resume from mask     : YES (${ECC_MASK})"
@@ -214,11 +256,25 @@ log "------------------------------------------------------------"
 # Verify required tools are available
 log "Checking required tools..."
 for tool in mrconvert mrinfo dwidenoise mrdegibbs dwifslpreproc \
-            dwibiascorrect dwi2tensor tensor2metric dwiextract \
-            mrmath mrcat fslmaths 3dSkullStrip; do
+            dwibiascorrect dwi2mask dwi2tensor tensor2metric dwiextract \
+            mrmath mrcat fslmaths; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "Required tool not found in PATH: $tool"
 done
+
+# AFNI is only needed for NHP auto-masking (not when resuming from a supplied mask)
+if [[ "$SPECIES" = "nhp" && "$RESUME_FROM_MASK" = false ]]; then
+    command -v 3dSkullStrip >/dev/null 2>&1 \
+        || die "Required tool not found in PATH: 3dSkullStrip (AFNI) — needed for -S nhp"
+fi
+
+# ANTs is only needed for template-space warping
+if [[ "$WARP_TO_TEMPLATE" = true ]]; then
+    command -v antsRegistrationSyN.sh >/dev/null 2>&1 \
+        || die "Required tool not found in PATH: antsRegistrationSyN.sh (ANTs) — needed for -f"
+    command -v antsApplyTransforms >/dev/null 2>&1 \
+        || die "Required tool not found in PATH: antsApplyTransforms (ANTs) — needed for -f"
+fi
 log "All required tools found."
 
 # =============================================================================
@@ -367,43 +423,55 @@ else
     log " Saved preprocessed DWI: ${AP_BASE}_ECC.nii.gz / .bvec / .bval"
 
     # -----------------------------------------------------------------------
-    # STEP 6: Brain mask — FSL mean + AFNI 3dSkullStrip -monkey + dilate
+    # STEP 6: Create brain mask — species-dependent
     # -----------------------------------------------------------------------
-    # Built directly off the topup+eddy-corrected output: FSL averages the
-    # ECC series to a single volume, AFNI skull-strips that volume with the
-    # -monkey NHP preset, and the resulting mask is binarized and slightly
-    # dilated. This mask drives bias correction, tensor fitting, and metric
-    # extraction below — replacing the old dwi2mask / FSL bet auto-mask.
-    log "------------------------------------------------------------"
-    log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey + dilate)"
+    if [[ "$SPECIES" = "nhp" ]]; then
 
-    # 6a. Average the eddy-corrected DWI series into a single 3D volume (FSL).
-    #     Operates on the ECC NIfTI exported in STEP 5.
-    log " Averaging ECC series with fslmaths -Tmean ..."
-    fslmaths "$OUTDIR/${AP_BASE}_ECC.nii.gz" -Tmean "$TMPDIR/ecc_mean.nii.gz"
+        # NHP: FSL averages the full ECC series, AFNI 3dSkullStrip extracts the
+        # brain with its -monkey preset (tuned for NHP EPI contrast), then the
+        # mask is binarised and dilated by one voxel. dwi2mask and FSL BET have
+        # both proven unreliable on this data, so AFNI is used instead.
+        log "------------------------------------------------------------"
+        log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey + dilate) [nhp]"
 
-    # 6b. Skull-strip the mean volume with AFNI (-monkey preset for NHP EPI).
-    #     -mask_vol yes emits a mask volume rather than the extracted brain.
-    log " Running AFNI 3dSkullStrip -monkey ..."
-    3dSkullStrip \
-        -input  "$TMPDIR/ecc_mean.nii.gz" \
-        -prefix "$TMPDIR/skullstrip_mask.nii.gz" \
-        -monkey \
-        -mask_vol yes \
-        -overwrite
+        # 6a. Average the eddy-corrected DWI series into a single 3D volume (FSL).
+        log " 6a: Averaging ECC series with fslmaths -Tmean"
+        fslmaths "$OUTDIR/${AP_BASE}_ECC.nii.gz" -Tmean "$TMPDIR/ecc_mean.nii.gz"
 
-    # 6c. Binarize and dilate slightly (1-voxel kernel) so the mask comfortably
-    #     covers the brain edge. NOTE: fslmaths cannot write MRtrix .mif — keep
-    #     this output as NIfTI, then import to .mif for the downstream steps.
-    log " Binarizing + dilating mask (fslmaths -bin -dilM) ..."
-    fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -dilM \
-        "$TMPDIR/brain_mask.nii.gz" -odt char
+        # 6b. Skull-strip the mean volume with AFNI (-monkey preset for NHP EPI).
+        #     -mask_vol yes emits a mask volume rather than the extracted brain.
+        log " 6b: Running AFNI 3dSkullStrip -monkey"
+        3dSkullStrip \
+            -input  "$TMPDIR/ecc_mean.nii.gz" \
+            -prefix "$TMPDIR/skullstrip_mask.nii.gz" \
+            -monkey \
+            -mask_vol yes \
+            -overwrite
 
-    # Import to MIF for the shared downstream steps and copy to output
-    mrconvert "$TMPDIR/brain_mask.nii.gz" "$TMPDIR/brain_mask.mif" -force
-    mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
+        # 6c. Binarize and dilate slightly (1-voxel kernel). NOTE: fslmaths
+        #     cannot write MRtrix .mif — keep this output as NIfTI, then import.
+        log " 6c: Binarising + dilating mask (fslmaths -bin -dilM)"
+        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -dilM \
+            "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
 
-    log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, 1-voxel dilated)"
+        mrconvert "$TMPDIR/brain_mask_DWI.nii.gz" "$TMPDIR/brain_mask.mif" -force
+        mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
+
+        log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, 1-voxel dilated)"
+        log " QC: inspect $TMPDIR/ecc_mean.nii.gz and ${AP_BASE}_mask.nii.gz"
+
+    else
+
+        # Human: MRtrix3 dwi2mask on the preprocessed DWI.
+        log "------------------------------------------------------------"
+        log "STEP 6: Creating brain mask (MRtrix3 dwi2mask) [human]"
+
+        dwi2mask "$TMPDIR/ap_preproc.mif" "$TMPDIR/brain_mask.mif" -force
+        mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
+
+        log " Saved: ${AP_BASE}_mask.nii.gz"
+
+    fi
 
 fi
 # =============================================================================
@@ -480,6 +548,48 @@ for metric in fa md ad rd; do
     log " Saved: ${AP_BASE}_${METRIC_UPPER}.nii.gz"
 done
 
+# -----------------------------------------------------------------------
+# STEP 11: (optional, -f) Normalize DTI maps to template space (ANTs SyN)
+# -----------------------------------------------------------------------
+if [[ "$WARP_TO_TEMPLATE" = true ]]; then
+    log "------------------------------------------------------------"
+    log "STEP 11: Normalizing DTI maps to FA template space (ANTs SyN)"
+
+    # 11a: Register native FA → FA template using SyN
+    log " 11a: Running antsRegistrationSyN.sh (FA → template)"
+    log " This step may take 30–60 minutes."
+    antsRegistrationSyN.sh \
+        -d 3 \
+        -f "$FA_TEMPLATE" \
+        -m "$OUTDIR/${AP_BASE}_FA.nii.gz" \
+        -o "$TMPDIR/ants_" \
+        -t s
+
+    log " ANTs registration complete."
+    log "   Affine:       $TMPDIR/ants_0GenericAffine.mat"
+    log "   Warp:         $TMPDIR/ants_1Warp.nii.gz"
+    log "   Inverse warp: $TMPDIR/ants_1InverseWarp.nii.gz"
+
+    # 11b: Apply composite warp to all four DTI metrics
+    log " 11b: Applying composite warp to DTI metrics"
+    for metric in fa md ad rd; do
+        METRIC_UPPER=$(echo "$metric" | tr '[:lower:]' '[:upper:]')
+        NATIVE_MAP="$OUTDIR/${AP_BASE}_${METRIC_UPPER}.nii.gz"
+        WARPED_MAP="$OUTDIR/w${AP_BASE}_ECC_${METRIC_UPPER}.nii.gz"
+
+        antsApplyTransforms \
+            -d 3 \
+            -i "$NATIVE_MAP" \
+            -r "$FA_TEMPLATE" \
+            -t "$TMPDIR/ants_1Warp.nii.gz" \
+            -t "$TMPDIR/ants_0GenericAffine.mat" \
+            -o "$WARPED_MAP" \
+            -n Linear
+
+        log " Saved (template space): w${AP_BASE}_ECC_${METRIC_UPPER}.nii.gz"
+    done
+fi
+
 # =============================================================================
 # CLEANUP
 # =============================================================================
@@ -503,16 +613,29 @@ log " Preprocessed DWI (full multi-shell, native space):"
 log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
 log "   ${AP_BASE}_ECC.bval     b-values"
-log "   ${AP_BASE}_mask.nii.gz"
+if [[ "$SPECIES" = "nhp" ]]; then
+    log "   ${AP_BASE}_mask.nii.gz  brain mask (AFNI 3dSkullStrip -monkey, 1-voxel dilated)"
+else
+    log "   ${AP_BASE}_mask.nii.gz  brain mask (MRtrix3 dwi2mask)"
+fi
 log ""
 log " DTI metrics — Native DWI space:"
 log "   ${AP_BASE}_FA.nii.gz     Fractional Anisotropy"
 log "   ${AP_BASE}_MD.nii.gz     Mean Diffusivity"
 log "   ${AP_BASE}_AD.nii.gz     Axial Diffusivity"
 log "   ${AP_BASE}_RD.nii.gz     Radial Diffusivity"
+if [[ "$WARP_TO_TEMPLATE" = true ]]; then
+    log ""
+    log " DTI metrics — Template space (ANTs SyN):"
+    log "   w${AP_BASE}_ECC_FA.nii.gz"
+    log "   w${AP_BASE}_ECC_MD.nii.gz"
+    log "   w${AP_BASE}_ECC_AD.nii.gz"
+    log "   w${AP_BASE}_ECC_RD.nii.gz"
+fi
 log ""
 log " Multi-shell note:"
 log "   Data contains b = 0, 500, 1000, 2000."
 log "   Tensor fitted using b=0 + b=${DTI_SHELL} only (standard DTI)."
-log "   For advanced models (NODDI, SMT, MSMT-CSD), use dwi_preproc.nii.gz"
+log "   For advanced models (NODDI, SMT, MSMT-CSD), use ${AP_BASE}_ECC.nii.gz"
 log "   with all shells."
+log "============================================================"

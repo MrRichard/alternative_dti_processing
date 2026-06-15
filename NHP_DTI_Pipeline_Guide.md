@@ -1,8 +1,13 @@
 # NHP DTI Processing Pipeline — Student Guide
 
-This guide walks through every step of the NHP diffusion tensor imaging (DTI) pipeline
-(`process_dti_nhp.sh`), explaining what each command does, which software it comes from,
-and where to find the official documentation.
+This guide walks through every step of the NHP diffusion tensor imaging (DTI) pipeline,
+explaining what each command does, which software it comes from, and where to find the
+official documentation.
+
+The pipeline is a single script, `process_dti.sh`, shared by human and NHP data. Run it
+with `-S nhp` for monkey data, which selects AFNI `3dSkullStrip -monkey` brain masking
+(see Step 6). For a concise overview and the full option list, see
+[`README.md`](README.md); for a methods-section write-up, see [`methods_nhp.md`](methods_nhp.md).
 
 ---
 
@@ -17,7 +22,7 @@ and where to find the official documentation.
 7. [Step 3 — Gibbs Ringing Correction](#step-3--gibbs-ringing-correction)
 8. [Step 4 — Build the SE-EPI b0 Pair](#step-4--build-the-se-epi-b0-pair)
 9. [Step 5 — Distortion and Eddy Current Correction](#step-5--distortion-and-eddy-current-correction)
-10. [Step 6 — Brain Mask via FLIRT Coregistration (NHP-specific)](#step-6--brain-mask-via-flirt-coregistration-nhp-specific)
+10. [Step 6 — Brain Mask via AFNI 3dSkullStrip -monkey (NHP-specific)](#step-6--brain-mask-via-afni-3dskullstrip--monkey-nhp-specific)
 11. [Step 7 — Bias Field Correction](#step-7--bias-field-correction)
 12. [Step 8 — Extract DTI Shell](#step-8--extract-dti-shell)
 13. [Step 9 — Fit the Diffusion Tensor](#step-9--fit-the-diffusion-tensor)
@@ -59,8 +64,8 @@ recipe that describes what to install and configure.
 The workflow is:
 
 ```
-Singularity_nhp.def  →  (build)  →  Singularity_nhp.sif
-      (recipe)                          (executable image)
+Singularity.def  →  (build)  →  alternative_dti_processing.sif
+   (recipe)                          (executable image)
 ```
 
 Once built, the `.sif` file is portable. Copy it to any Linux machine with Singularity
@@ -69,15 +74,17 @@ separately.
 
 **Build command** (requires root or `--fakeroot` on your cluster):
 ```bash
-singularity build Singularity_nhp.sif Singularity_nhp.def
+singularity build alternative_dti_processing.sif Singularity.def
 ```
 
 ---
 
 ## 3. Running the Container
 
-The NHP container **does not run the pipeline automatically**. You must explicitly call the
-script so you can control your bind mounts and arguments.
+Call the pipeline script explicitly with `singularity exec` so you control your bind mounts
+and arguments. (The container's `run` action defaults to `process_dti.sh`, so
+`singularity run <sif> -a ... -S nhp` — arguments only, no script path — is equivalent;
+using `exec <sif> /app/process_dti.sh ...` is shown here because it makes the call explicit.)
 
 ### Bind mounts (`-B`)
 
@@ -95,24 +102,27 @@ inside the container.
 ### Example invocation
 
 ```bash
-singularity run \
+singularity exec \
     -B /data/nhp_study/sub01:/data \
     -B /data/nhp_study/sub01/output:/out \
-    Singularity_nhp.sif \
-    /app/process_dti_nhp.sh \
+    alternative_dti_processing.sif \
+    /app/process_dti.sh \
         -a /data/AP_DWI.nii.gz \
         -v /data/AP.bvec \
         -b /data/AP.bval \
         -p /data/PA_DWI.nii.gz \
-        -t /data/T1w.nii.gz \
-        -m /data/T1w_brain_mask.nii.gz \
-        -f /data/NMT_FA_template.nii.gz \
-        -o /out/sub01
+        -o /out/sub01 \
+        -S nhp
 ```
+
+`-S nhp` selects AFNI `3dSkullStrip -monkey` brain masking (Step 6). To additionally warp
+the DTI maps to a template, add `-f /data/NMT_FA_template.nii.gz` (Step 11). The T1w image
+and T1w mask are no longer required — NHP masking is derived directly from the diffusion
+data.
 
 To get an interactive shell inside the container (useful for debugging):
 ```bash
-singularity shell -B /data/nhp_study:/data Singularity_nhp.sif
+singularity shell -B /data/nhp_study:/data alternative_dti_processing.sif
 ```
 
 ---
@@ -126,13 +136,16 @@ Raw AP DWI + PA b0  ──►  [1] mrconvert     Convert to .mif
                      ──►  [4] dwiextract    Build b0 pair for topup
                           mrmath / mrcat
                      ──►  [5] dwifslpreproc  Distortion + eddy correction
-                     ──►  [6] FLIRT          T1w mask → DWI space  ← NHP-specific
+                     ──►  [6] 3dSkullStrip   FSL mean + AFNI -monkey mask  ← NHP (-S nhp)
                      ──►  [7] dwibiascorrect  Bias field correction
                      ──►  [8] dwiextract     Isolate DTI shell (b=0 + b=1000)
                      ──►  [9] dwi2tensor     Fit diffusion tensor
                      ──► [10] tensor2metric  FA / MD / AD / RD (native space)
-                     ──► [11] ANTs SyN       Warp to FA template  ← NHP-specific
+                     ──► [11] ANTs SyN       Warp to FA template  ← optional (-f)
 ```
+
+> Step 6 is species-aware: `-S nhp` uses AFNI `3dSkullStrip -monkey`, while the default
+> (human) uses MRtrix3 `dwi2mask`. Step 11 runs only when an FA template is given with `-f`.
 
 The pipeline processes **multi-shell DWI** data (b = 0, 500, 1000, 2000 s/mm²) but fits
 the diffusion tensor using only the **b=0 and b=1000** shells — the standard clinical DTI
@@ -289,80 +302,64 @@ After this step, the fully corrected multi-shell DWI is exported to NIfTI
 
 ---
 
-## Step 6 — Brain Mask via FLIRT Coregistration (NHP-specific)
+## Step 6 — Brain Mask via AFNI 3dSkullStrip -monkey (NHP-specific)
 
-**Software:** FSL
-**Documentation:** [FLIRT](https://fsl.fmrib.ox.ac.uk/fsl/docs/#/registration/flirt)
+**Software:** FSL (`fslmaths`) + AFNI (`3dSkullStrip`)
+**Documentation:** [3dSkullStrip](https://afni.nimh.nih.gov/pub/dist/doc/program_help/3dSkullStrip.html)
 
-> **Why not `dwi2mask`?**
-> The standard MRtrix3 `dwi2mask` command uses a brain extraction algorithm tuned for
-> human brain proportions and typical coil coverage. NHP brains differ substantially —
-> smaller relative to the field of view, different skull morphology, different signal
-> dropout patterns. `dwi2mask` frequently over- or under-segments NHP data. Instead, we
-> use a high-quality T1w brain mask that was drawn or computed in the anatomical space,
-> then coregister it into DWI space.
+> **Why not `dwi2mask` or `bet`?**
+> MRtrix3 `dwi2mask` is tuned for human brain proportions and coil coverage; FSL `bet`
+> needs careful per-subject tuning. Both proved unreliable on NHP EPI data — smaller brain
+> relative to the field of view, different skull morphology, different dropout patterns.
+> Earlier attempts to coregister an anatomical T1w mask into DWI space were also
+> unreliable. The robust solution is to mask directly from the corrected diffusion data
+> using AFNI's `-monkey` preset, which is tuned for non-human primate EPI contrast.
+>
+> For **human** data the same script (`process_dti.sh` without `-S nhp`) uses `dwi2mask`,
+> which is appropriate there.
 
-This step has four sub-steps:
+This step has three sub-steps. It runs only when the pipeline is invoked with `-S nhp`.
 
-### 6a — Extract mean corrected b0
+### 6a — Average the ECC series (FSL)
 
 ```bash
-dwiextract -bzero ap_preproc.mif - | mrmath - mean -axis 3 b0_corrected.mif
-mrconvert b0_corrected.mif b0_corrected.nii.gz
+fslmaths AP_BASE_ECC.nii.gz -Tmean ecc_mean.nii.gz
 ```
 
-The corrected b=0 image is used as the **registration target** (reference). It is in DWI
-space and has high SNR, making it a reliable registration reference.
+`fslmaths -Tmean` averages the full eddy-corrected series across all volumes into a single
+3D image. Averaging many volumes raises SNR and gives a stable brain boundary for skull
+stripping — more reliable than a single mean b0.
 
-### 6b — FLIRT: coregister T1w → b0
+### 6b — Skull-strip with AFNI (`-monkey`)
 
 ```bash
-flirt -in T1w.nii.gz -ref b0_corrected.nii.gz \
-      -omat T1w_to_DWI.mat \
-      -cost mutualinfo -dof 6 \
-      -out T1w_in_DWI.nii.gz
+3dSkullStrip -input ecc_mean.nii.gz -prefix skullstrip_mask.nii.gz \
+             -monkey -mask_vol yes -overwrite
 ```
 
-**FLIRT** (FMRIB's Linear Image Registration Tool) finds the rigid-body transformation
-that best aligns the T1w image to the b0. Key options:
+**3dSkullStrip** extracts the brain using a deformable surface model.
 
-- `-cost mutualinfo` — uses **Mutual Information** as the similarity metric. Because the
-  T1w and b0 have very different contrast (T1w: bright CSF, dark WM; b=0: roughly
-  opposite), a metric like correlation would fail. Mutual information measures statistical
-  dependence between intensity distributions and works across modalities.
-- `-dof 6` — limits the transform to **6 degrees of freedom** (3 translations + 3
-  rotations, i.e. rigid body). This is appropriate because the brain geometry should not
-  change between the T1w and DWI acquisitions — we are only correcting for head position.
-- `-omat` — saves the transformation matrix (a 4×4 affine matrix in FSL format) for reuse
-  in the next step.
+- `-monkey` — preset that adapts the surface-expansion parameters to non-human primate
+  brain size and EPI contrast.
+- `-mask_vol yes` — outputs a mask volume rather than the extracted (intensity) brain.
 
-### 6c — Apply transform to the brain mask
+### 6c — Binarise, dilate, and convert to MIF
 
 ```bash
-flirt -in T1w_brain_mask.nii.gz -ref b0_corrected.nii.gz \
-      -applyxfm -init T1w_to_DWI.mat \
-      -interp nearestneighbour \
-      -out brain_mask_DWI.nii.gz
-```
-
-The same transformation matrix is applied to the binary brain mask.
-
-- `-applyxfm -init` — applies a pre-computed transform without re-estimating it, ensuring
-  the mask moves identically to the T1w image.
-- `-interp nearestneighbour` — **critical for binary masks**. Standard trilinear
-  interpolation would blur the edges of the mask, creating voxels with fractional values
-  (e.g. 0.3, 0.7) that are not valid for a binary mask. Nearest-neighbour interpolation
-  assigns each output voxel the value of the nearest input voxel, preserving the 0/1
-  binary nature of the mask.
-
-### 6d — Convert mask back to MIF
-
-```bash
+fslmaths skullstrip_mask.nii.gz -bin -dilM brain_mask_DWI.nii.gz -odt char
 mrconvert brain_mask_DWI.nii.gz brain_mask.mif
 ```
 
-Downstream MRtrix3 steps expect the mask in MIF format. This line also saves a copy to
-the output directory as `AP_BASE_mask.nii.gz`.
+- `-bin` — collapses the mask to strictly 0/1.
+- `-dilM` — dilates the mask by **one voxel** (a 3×3×3 mean dilation), so it comfortably
+  covers the cortical edge without clipping. Note that `fslmaths` cannot write MRtrix
+  `.mif`, so the binarised/dilated mask is written as NIfTI and then imported.
+- `mrconvert` brings the mask into MIF for the downstream MRtrix3 steps. A copy is also
+  saved to the output directory as `AP_BASE_mask.nii.gz`.
+
+> **QC tip:** always inspect `ecc_mean.nii.gz` against `AP_BASE_mask.nii.gz`. If the mask is
+> over- or under-inclusive, you can hand-edit it and re-run the pipeline with `-c` to
+> resume from bias correction using your corrected mask.
 
 ---
 
@@ -473,6 +470,9 @@ Each metric is saved as a NIfTI file in the **native DWI space** of this subject
 **Software:** ANTs (Advanced Normalization Tools)
 **Documentation:** [ANTs Wiki](https://github.com/ANTsX/ANTs/wiki)
 
+> **Optional step.** This runs only when an FA template is supplied with `-f`. Without
+> `-f`, the pipeline stops after Step 10 and produces native-space maps only.
+
 > **Why normalize?**
 > Each subject's brain sits in its own native space — a coordinate system defined by
 > where the animal's head happened to be in the scanner. To compare FA or MD values
@@ -546,7 +546,7 @@ All outputs appear in the directory you specified with `-o`.
 | `<AP_BASE>_ECC.nii.gz` | Full preprocessed multi-shell DWI (all b-values) |
 | `<AP_BASE>_ECC.bvec` | Eddy-rotated gradient directions |
 | `<AP_BASE>_ECC.bval` | B-values |
-| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (derived from T1w via FLIRT) |
+| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (AFNI `3dSkullStrip -monkey`, 1-voxel dilated) |
 | `<AP_BASE>_FA.nii.gz` | Fractional Anisotropy |
 | `<AP_BASE>_MD.nii.gz` | Mean Diffusivity |
 | `<AP_BASE>_AD.nii.gz` | Axial Diffusivity |
@@ -568,8 +568,9 @@ All outputs appear in the directory you specified with `-o`.
 | Software | Version | Purpose |
 |----------|---------|---------|
 | **MRtrix3** | latest (from `mrtrix3/mrtrix3:latest`) | DWI processing, format conversion, tensor fitting |
-| **FSL** | bundled with MRtrix3 base image | topup, eddy, FLIRT |
-| **ANTs** | 2.6.5 | SyN registration, applying transforms |
+| **FSL** | bundled with MRtrix3 base image | topup, eddy, FAST, `fslmaths` |
+| **AFNI** | `linux_openmp_64` | `3dSkullStrip -monkey` (NHP brain masking) |
+| **ANTs** | 2.6.5 | SyN registration, applying transforms (optional `-f`) |
 | **Python 3** | Debian 12 default | JSON sidecar parsing (readout time) |
 
 The container is built on **Debian 12 (bookworm)**, amd64. ANTs is the precompiled

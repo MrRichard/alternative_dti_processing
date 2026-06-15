@@ -54,6 +54,23 @@ From: mrtrix3/mrtrix3:latest
         fi
     fi
 
+    # -------------------------------------------------------------------------
+    # ANTs v2.6.5 — precompiled Ubuntu 22.04 amd64 build (Debian 12 compatible).
+    # Used by process_dti.sh -f (ANTs SyN warping of DTI maps to a template).
+    # NOTE: /opt/ants is already used by the mrtrix3 base image (N4 stub only),
+    # so full ANTs is installed to /opt/antsx to avoid overwriting it.
+    # -------------------------------------------------------------------------
+    echo "INFO: Installing ANTs 2.6.5..."
+    apt-get install -y --no-install-recommends unzip
+    ANTS_URL="https://github.com/ANTsX/ANTs/releases/download/v2.6.5/ants-2.6.5-ubuntu-22.04-X64-gcc.zip"
+    wget -q -O /tmp/ants.zip "${ANTS_URL}"
+    mkdir -p /opt/antsx
+    unzip -q /tmp/ants.zip -d /tmp/ants_extracted
+    mv /tmp/ants_extracted/ants-*/bin /opt/antsx/bin
+    mv /tmp/ants_extracted/ants-*/lib /opt/antsx/lib
+    rm -rf /tmp/ants.zip /tmp/ants_extracted
+    echo "INFO: ANTs installation complete — $(ls /opt/antsx/bin | wc -l) binaries installed"
+
     echo "INFO: Installing Python dependencies..."
     apt-get install -y --no-install-recommends python3 python3-pip
     rm -rf /var/lib/apt/lists/*
@@ -63,7 +80,9 @@ From: mrtrix3/mrtrix3:latest
 %environment
     export FSLOUTPUTTYPE=NIFTI_GZ
     export FSLDIR="/opt/fsl"
-    export PATH="/opt/fsl/bin:/opt/afni:$PATH"
+    export ANTSPATH="/opt/antsx/bin"
+    export LD_LIBRARY_PATH="/opt/antsx/lib:${LD_LIBRARY_PATH:-}"
+    export PATH="/opt/fsl/bin:/opt/afni:/opt/antsx/bin:$PATH"
 
 %runscript
     exec /app/process_dti.sh "$@"
