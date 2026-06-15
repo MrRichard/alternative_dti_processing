@@ -344,16 +344,19 @@ stripping — more reliable than a single mean b0.
 - `-mask_vol` — outputs a mask volume rather than the extracted (intensity) brain. This
   flag takes no argument.
 
-### 6c — Binarise and convert to MIF
+### 6c — Binarise, erode, and convert to MIF
 
 ```bash
-fslmaths skullstrip_mask.nii.gz -bin brain_mask_DWI.nii.gz -odt char
+fslmaths skullstrip_mask.nii.gz -bin -ero brain_mask_DWI.nii.gz -odt char
 mrconvert brain_mask_DWI.nii.gz brain_mask.mif
 ```
 
-- `-bin` — collapses the mask to strictly 0/1. The raw `3dSkullStrip` mask is used as-is;
-  no dilation or erosion is applied. Note that `fslmaths` cannot write MRtrix `.mif`, so
-  the binarised mask is written as NIfTI and then imported.
+- `-bin` — collapses the mask to strictly 0/1.
+- `-ero` — erodes the mask by **one voxel** (a 3×3×3 minimum filter), removing the
+  outermost layer that typically contains non-brain tissue (dura, meninges) that
+  `3dSkullStrip` includes at the brain edge. This tightens the mask to true brain
+  tissue. Note that `fslmaths` cannot write MRtrix `.mif`, so the binarised/eroded
+  mask is written as NIfTI and then imported.
 - `mrconvert` brings the mask into MIF for the downstream MRtrix3 steps. A copy is also
   saved to the output directory as `AP_BASE_mask.nii.gz`.
 
@@ -546,7 +549,7 @@ All outputs appear in the directory you specified with `-o`.
 | `<AP_BASE>_ECC.nii.gz` | Full preprocessed multi-shell DWI (all b-values) |
 | `<AP_BASE>_ECC.bvec` | Eddy-rotated gradient directions |
 | `<AP_BASE>_ECC.bval` | B-values |
-| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (AFNI `3dSkullStrip -monkey`, raw mask) |
+| `<AP_BASE>_mask.nii.gz` | Brain mask in DWI space (AFNI `3dSkullStrip -monkey`, 1-voxel eroded) |
 | `<AP_BASE>_FA.nii.gz` | Fractional Anisotropy |
 | `<AP_BASE>_MD.nii.gz` | Mean Diffusivity |
 | `<AP_BASE>_AD.nii.gz` | Axial Diffusivity |
