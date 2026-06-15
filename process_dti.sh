@@ -4,9 +4,10 @@
 #
 # Designed to run inside the MRtrix3 Singularity container.
 # Requires tools: MRtrix3 (mrconvert, dwidenoise, mrdegibbs, dwifslpreproc,
-#                           dwibiascorrect, dwi2mask, dwi2tensor, tensor2metric,
+#                           dwibiascorrect, dwi2tensor, tensor2metric,
 #                           dwiextract, mrmath, mrcat)
-#                 FSL (topup/eddy — available in container via dwifslpreproc dependency)
+#                 FSL (fslmaths — available in container)
+#                 AFNI (3dSkullStrip — required for NHP brain masking)
 #
 # ------------------------------------------------------------------------------------------------------------------------------------------
 # INPUT DATA NOTES
@@ -60,34 +61,14 @@ Optional:
   -c FILE   Path to a pre-made brain mask (NIfTI) in the same space and
             resolution as the ECC NIfTI output. Use this to resume from
             bias correction onward, skipping topup/eddy/auto-masking.
-            Mutually exclusive with -m.
-  -m        Manual skull-strip mode. The pipeline runs through eddy-current
-            correction (step 5), saves the ECC NIfTI+bvec+bval, generates
-            a ready-to-run AFNI skull-stripping script, then stops so you
-            can create a brain mask manually on a cluster with AFNI installed.
-            Mutually exclusive with -c.
   -k        Keep intermediate files in <outdir>/tmp/ [default: delete]
   -h        Show this help message
 
 Outputs (in <outdir>/):
   <apbase>_ECC.{nii.gz,bvec,bval}     — preprocessed full multi-shell DWI
-  <apbase>_mask.nii.gz
+  <apbase>_mask.nii.gz                — binary brain mask (1=inside, 0=outside)
   <apbase>_{FA,MD,AD,RD}.nii.gz       — DTI maps in native DWI space
-  <apbase>_make_mask.sh              — (with -m only) AFNI skull-strip script
   pipeline.log                         — full processing log
-
-NHP workflow (non-human primate data with failed auto-masking):
-  Step 1 — Run with -m to generate ECC output and the AFNI mask script:
-    ./process_dti.sh -a ... -v ... -b ... -p ... -o OUTDIR -m
-
-  Step 2 — Run the generated AFNI script on a cluster with AFNI installed:
-    bash ${OUTDIR}/${AP_BASE}_make_mask.sh
-    # This produces: ${OUTDIR}/${AP_BASE}_brain_mask.nii.gz
-
-  Step 3 — Resume with -c pointing to the mask:
-    ./process_dti.sh -a ... -v ... -b ... -p ... -o OUTDIR \
-                    -c ${OUTDIR}/${AP_BASE}_brain_mask.nii.gz
-    (omit -m; all other flags identical to step 1)
 
 EOF
     exit 0
@@ -125,10 +106,9 @@ READOUT_TIME="0.06"
 READOUT_TIME_MANUAL=false
 DTI_SHELL="1000"
 KEEP_INTERMEDIATES=false
-MANUAL_SKULL_STRIP=false
 ECC_MASK=""
 
-while getopts "a:v:b:p:o:r:s:c:mkth" opt; do
+while getopts "a:v:b:p:o:r:s:c:kth" opt; do
     case "$opt" in
         a) AP_DWI="$OPTARG" ;;
         v) AP_BVEC="$OPTARG" ;;
@@ -138,7 +118,6 @@ while getopts "a:v:b:p:o:r:s:c:mkth" opt; do
         r) READOUT_TIME="$OPTARG"; READOUT_TIME_MANUAL=true ;;
         s) DTI_SHELL="$OPTARG" ;;
         c) ECC_MASK="$OPTARG" ;;
-        m) MANUAL_SKULL_STRIP=true ;;
         k) KEEP_INTERMEDIATES=true ;;
         h) usage ;;
         *) die "Unknown option. Use -h for help." ;;
@@ -159,11 +138,6 @@ done
 # Validate mask-related arguments
 if [[ -n "$ECC_MASK" && ! -f "$ECC_MASK" ]]; then
     die "Pre-made brain mask not found: $ECC_MASK"
-fi
-
-# Mutually exclusive: -m and -c
-if [[ "$MANUAL_SKULL_STRIP" = true && -n "$ECC_MASK" ]]; then
-    die "Options -m and -c are mutually exclusive. Use -m to stop after ECC and create a mask, or -c to supply an existing mask — not both."
 fi
 
 # Derive base filename from AP DWI input (strip path and .nii/.nii.gz extension)
@@ -234,16 +208,14 @@ log " DTI shell            : b=${DTI_SHELL}"
 log " Keep intermediates   : $KEEP_INTERMEDIATES"
 if [[ "$RESUME_FROM_MASK" = true ]]; then
     log " Resume from mask     : YES (${ECC_MASK})"
-elif [[ "$MANUAL_SKULL_STRIP" = true ]]; then
-    log " Manual skull-strip   : YES (pipeline will stop after ECC)"
 fi
 log "------------------------------------------------------------"
 
 # Verify required tools are available
 log "Checking required tools..."
 for tool in mrconvert mrinfo dwidenoise mrdegibbs dwifslpreproc \
-            dwibiascorrect dwi2mask dwi2tensor tensor2metric dwiextract \
-            mrmath mrcat; do
+            dwibiascorrect dwi2tensor tensor2metric dwiextract \
+            mrmath mrcat fslmaths 3dSkullStrip; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "Required tool not found in PATH: $tool"
 done
@@ -395,163 +367,43 @@ else
     log " Saved preprocessed DWI: ${AP_BASE}_ECC.nii.gz / .bvec / .bval"
 
     # -----------------------------------------------------------------------
-    # EARLY EXIT: manual skull-strip mode — stop here, let user create mask
+    # STEP 6: Brain mask — FSL mean + AFNI 3dSkullStrip -monkey + dilate
     # -----------------------------------------------------------------------
-    if [[ "$MANUAL_SKULL_STRIP" = true ]]; then
-        MASK_SCRIPT="$OUTDIR/${AP_BASE}_make_mask.sh"
-
-        # Generate the AFNI skull-stripping script for the user to run on a cluster
-        cat > "$MASK_SCRIPT" << 'AFNISCRIPT'
-#!/bin/bash
-# =============================================================================
-# AFNI NHP Brain Mask Generation Script
-# Generated by process_dti.sh — manual skull-strip workflow
-# =============================================================================
-#
-# HOW TO USE:
-#   Run this script on a machine/cluster with AFNI installed.
-#   It reads the ECC NIfTI from the output directory and produces a brain mask.
-#
-#   IMPORTANT: This script must be run AFTER running process_dti.sh with -m.
-#   Do NOT move or rename the ECC NIfTI — the mask must be in the same
-#   space and resolution as the ECC image.
-#
-# OUTPUT:
-#   <outdir>/<apbase>_brain_mask.nii.gz  — binary brain mask (1=inside, 0=outside)
-#
-# WHAT THIS SCRIPT DOES:
-#   1. Computes the mean of the 4D ECC volume (average across all volumes)
-#   2. Runs AFNI 3dSkullStrip with -monkey flag (designed for NHP EPI data)
-#   3. Erodes the mask by 1 voxel to remove skull/dura edge signals
-#   4. Fills interior holes (ventricles, cysts)
-#   5. Keeps only the largest connected component (removes eye blobs, neck)
-#
-# AFNI INSTALLATION (if not already available):
-#   On Ubuntu/Debian:  apt-get install afni
-#   On CentOS/RHEL:    yum install afni
-#   Or download:       https://afni.nimh.nih.gov/pub/dist/tgz/linux_afni.tgz
-#
-# =============================================================================
-
-set -e
-
-# --- Configuration (edit these if your setup differs) ---
-# These are auto-populated by process_dti.sh based on your data.
-
-AFNISCRIPT
-
-        # Append the actual runtime values into the generated script
-        cat >> "$MASK_SCRIPT" << EOF
-ECC_NII="${OUTDIR}/${AP_BASE}_ECC.nii.gz"
-MASK_OUT="${OUTDIR}/${AP_BASE}_brain_mask.nii.gz"
-TMP_DIR=$(mktemp -d)
-
-echo "AFNI NHP Mask Generation"
-echo "========================"
-echo "Input ECC  : \$ECC_NII"
-echo "Output mask: \$MASK_OUT"
-echo ""
-
-# Verify input exists
-[[ -f "\$ECC_NII" ]] || { echo "ERROR: ECC NIfTI not found: \$ECC_NII"; echo "Run process_dti.sh with -m first."; exit 1; }
-
-# Step 1 — Compute 3D mean of the 4D ECC volume
-echo "[1/4] Computing mean of ECC volume..."
-3dTstat -mean -prefix "\${TMP_DIR}/ecc_mean.nii.gz" "\$ECC_NII" -overwrite
-
-# Step 2 — Run 3dSkullStrip with -monkey flag (designed for NHP EPI)
-echo "[2/4] Running AFNI 3dSkullStrip -monkey..."
-3dSkullStrip \
-    -input  "\${TMP_DIR}/ecc_mean.nii.gz" \
-    -prefix "\${TMP_DIR}/mask_raw.nii.gz" \
-    -monkey \
-    -mask_vol yes \
-    -overwrite
-
-# Step 3 — Erode slightly to remove skull/dura edge signal bleed
-echo "[3/4] Eroding mask (1 voxel) and filling holes..."
-3dmask_tool \
-    -input  "\${TMP_DIR}/mask_raw.nii.gz" \
-    -prefix "\${TMP_DIR}/mask_eroded.nii.gz" \
-    -erode  1 \
-    -fill_holes \
-    -overwrite
-
-# Step 4 — Keep only the largest connected component (removes eye blobs, neck)
-echo "[4/4] Keeping largest connected component..."
-3dmask_tool \
-    -input  "\${TMP_DIR}/mask_eroded.nii.gz" \
-    -prefix "\$MASK_OUT" \
-    -infracluster 0.9 \
-    -overwrite
-
-# Verify output
-if [[ -f "\$MASK_OUT" ]]; then
-    echo ""
-    echo "SUCCESS: Brain mask saved to:"
-    echo "  \$MASK_OUT"
-    echo ""
-    echo "Next step — resume the DTI pipeline with:"
-    echo "  ./process_dti.sh \\"
-    echo "      -a $AP_DWI \\"
-    echo "      -v $AP_BVEC \\"
-    echo "      -b $AP_BVAL \\"
-    echo "      -p $PA_DWI \\"
-    echo "      -o $OUTDIR \\"
-    echo "      -c \$MASK_OUT"
-else
-    echo "ERROR: Mask was not produced. Check AFNI installation and try again."
-    exit 1
-fi
-
-rm -rf "\${TMP_DIR}"
-EOF
-
-        chmod +x "$MASK_SCRIPT"
-
-        log ""
-        log "============================================================"
-        log " MANUAL SKULL-STRIP MODE — pipeline stopped after ECC"
-        log "============================================================"
-        log ""
-        log " The ECC NIfTI and gradient files have been saved:"
-        log "   ${OUTDIR}/${AP_BASE}_ECC.nii.gz"
-        log "   ${OUTDIR}/${AP_BASE}_ECC.bvec"
-        log "   ${OUTDIR}/${AP_BASE}_ECC.bval"
-        log ""
-        log " A ready-to-run AFNI skull-stripping script has been generated:"
-        log "   ${MASK_SCRIPT}"
-        log ""
-        log " NEXT STEPS:"
-        log "  1. Copy the generated script to a machine/cluster with AFNI installed."
-        log "  2. Run:  bash ${AP_BASE}_make_mask.sh"
-        log "     (This produces: ${OUTDIR}/${AP_BASE}_brain_mask.nii.gz)"
-        log "  3. Copy the mask back to this machine if needed."
-        log "  4. Rerun this script with identical -a/-v/-b/-p/-o arguments"
-        log "     plus -c pointing to the mask (omit -m):"
-        log ""
-        log "   ./process_dti.sh \\"
-        log "       -a $AP_DWI \\"
-        log "       -v $AP_BVEC \\"
-        log "       -b $AP_BVAL \\"
-        log "       -p $PA_DWI \\"
-        log "       -o $OUTDIR \\"
-        log "       -c ${OUTDIR}/${AP_BASE}_brain_mask.nii.gz"
-        log ""
-        log "============================================================"
-        exit 0
-    fi
-
-    # -----------------------------------------------------------------------
-    # STEP 6: Create brain mask — MRtrix3 dwi2mask (standard path)
-    # -----------------------------------------------------------------------
+    # Built directly off the topup+eddy-corrected output: FSL averages the
+    # ECC series to a single volume, AFNI skull-strips that volume with the
+    # -monkey NHP preset, and the resulting mask is binarized and slightly
+    # dilated. This mask drives bias correction, tensor fitting, and metric
+    # extraction below — replacing the old dwi2mask / FSL bet auto-mask.
     log "------------------------------------------------------------"
-    log "STEP 6: Creating brain mask from preprocessed DWI"
+    log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey + dilate)"
 
-    dwi2mask "$TMPDIR/ap_preproc.mif" "$TMPDIR/brain_mask.mif" -force
+    # 6a. Average the eddy-corrected DWI series into a single 3D volume (FSL).
+    #     Operates on the ECC NIfTI exported in STEP 5.
+    log " Averaging ECC series with fslmaths -Tmean ..."
+    fslmaths "$OUTDIR/${AP_BASE}_ECC.nii.gz" -Tmean "$TMPDIR/ecc_mean.nii.gz"
+
+    # 6b. Skull-strip the mean volume with AFNI (-monkey preset for NHP EPI).
+    #     -mask_vol yes emits a mask volume rather than the extracted brain.
+    log " Running AFNI 3dSkullStrip -monkey ..."
+    3dSkullStrip \
+        -input  "$TMPDIR/ecc_mean.nii.gz" \
+        -prefix "$TMPDIR/skullstrip_mask.nii.gz" \
+        -monkey \
+        -mask_vol yes \
+        -overwrite
+
+    # 6c. Binarize and dilate slightly (1-voxel kernel) so the mask comfortably
+    #     covers the brain edge. NOTE: fslmaths cannot write MRtrix .mif — keep
+    #     this output as NIfTI, then import to .mif for the downstream steps.
+    log " Binarizing + dilating mask (fslmaths -bin -dilM) ..."
+    fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -dilM \
+        "$TMPDIR/brain_mask.nii.gz" -odt char
+
+    # Import to MIF for the shared downstream steps and copy to output
+    mrconvert "$TMPDIR/brain_mask.nii.gz" "$TMPDIR/brain_mask.mif" -force
     mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
 
-    log " Saved: ${AP_BASE}_mask.nii.gz"
+    log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, 1-voxel dilated)"
 
 fi
 # =============================================================================
