@@ -233,6 +233,23 @@ if [[ -n "$ECC_MASK" ]]; then
 fi
 
 # =============================================================================
+# AUTO-RESUME DETECTION — reuse existing ECC output
+# =============================================================================
+# topup + eddy (steps 1-5) are the slow part (30-90 min). If a previous run
+# already produced the ECC NIfTI + gradients in $OUTDIR, reuse them and skip
+# straight to masking. To force a full recompute, delete the *_ECC.* files
+# (or point -o at a fresh directory).
+REUSE_ECC=false
+if [[ "$RESUME_FROM_MASK" = false ]]; then
+    ECC_NII="$OUTDIR/${AP_BASE}_ECC.nii.gz"
+    ECC_BVEC="$OUTDIR/${AP_BASE}_ECC.bvec"
+    ECC_BVAL="$OUTDIR/${AP_BASE}_ECC.bval"
+    if [[ -f "$ECC_NII" && -f "$ECC_BVEC" && -f "$ECC_BVAL" ]]; then
+        REUSE_ECC=true
+    fi
+fi
+
+# =============================================================================
 # LOG HEADER
 # =============================================================================
 log "============================================================"
@@ -250,6 +267,8 @@ log " Template warp (-f)   : $([[ "$WARP_TO_TEMPLATE" = true ]] && echo "YES (${
 log " Keep intermediates   : $KEEP_INTERMEDIATES"
 if [[ "$RESUME_FROM_MASK" = true ]]; then
     log " Resume from mask     : YES (${ECC_MASK})"
+elif [[ "$REUSE_ECC" = true ]]; then
+    log " Reuse existing ECC   : YES (skipping topup/eddy — delete *_ECC.* to recompute)"
 fi
 log "------------------------------------------------------------"
 
@@ -324,6 +343,20 @@ else
     # =============================================================================
     # NORMAL PATH: steps 1-6 (raw → preprocessed + auto-mask)
     # =============================================================================
+
+  if [[ "$REUSE_ECC" = true ]]; then
+
+    # -----------------------------------------------------------------------
+    # AUTO-RESUME: existing ECC found — skip topup/eddy (steps 1-5)
+    # -----------------------------------------------------------------------
+    log "------------------------------------------------------------"
+    log ">> Reusing existing ECC output (skipping topup/eddy, steps 1-5)"
+    mrconvert "$ECC_NII" \
+        -fslgrad "$ECC_BVEC" "$ECC_BVAL" \
+        "$TMPDIR/ap_preproc.mif" -force
+    log " Imported existing ECC dimensions: $(mrinfo -size "$TMPDIR/ap_preproc.mif")"
+
+  else
 
     # -----------------------------------------------------------------------
     # STEP 1: Convert inputs to MIF format
@@ -422,6 +455,7 @@ else
 
     log " Saved preprocessed DWI: ${AP_BASE}_ECC.nii.gz / .bvec / .bval"
 
+  fi
     # -----------------------------------------------------------------------
     # STEP 6: Create brain mask — species-dependent
     # -----------------------------------------------------------------------
@@ -439,13 +473,14 @@ else
         fslmaths "$OUTDIR/${AP_BASE}_ECC.nii.gz" -Tmean "$TMPDIR/ecc_mean.nii.gz"
 
         # 6b. Skull-strip the mean volume with AFNI (-monkey preset for NHP EPI).
-        #     -mask_vol yes emits a mask volume rather than the extracted brain.
+        #     -mask_vol (no argument) emits a mask volume rather than the
+        #     extracted brain.
         log " 6b: Running AFNI 3dSkullStrip -monkey"
         3dSkullStrip \
             -input  "$TMPDIR/ecc_mean.nii.gz" \
             -prefix "$TMPDIR/skullstrip_mask.nii.gz" \
             -monkey \
-            -mask_vol yes \
+            -mask_vol \
             -overwrite
 
         # 6c. Binarize and dilate slightly (1-voxel kernel). NOTE: fslmaths
