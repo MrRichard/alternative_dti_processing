@@ -8,8 +8,9 @@
 #   -S human  (default) — MRtrix3 dwi2mask on the preprocessed DWI
 #   -S nhp              — mean b=0 from ECC series, then AFNI 3dSkullStrip
 #                         with the -monkey preset, -blur_fwhm 2, -no_touchup,
-#                         and 1-voxel erosion. Use this for non-human primate / monkey
-#                         data, where dwi2mask and BET are unreliable.
+#                         centroid-based ellipsoid ROI, and 1-voxel erosion.
+#                         Use this for non-human primate / monkey data, where
+#                         dwi2mask and BET are unreliable.
 #
 # Optional template normalisation (-f flag):
 #   Provide an FA template to additionally warp the native DTI maps into
@@ -69,7 +70,7 @@ Required:
 Optional:
   -S SPEC   Species / masking strategy: 'human' or 'nhp' [default: human]
               human — MRtrix3 dwi2mask
-              nhp   — FSL mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion
+              nhp   — FSL mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + centroid ROI + 1-voxel erosion
                       (recommended for monkey/NHP data)
   -f FILE   FA template (NIfTI). If given, native DTI maps are additionally
             warped to this template with ANTs SyN (any species).
@@ -468,7 +469,7 @@ else
     # residual non-brain halo. dwi2mask and FSL BET have both proven
     # unreliable on this data, so AFNI is used.
         log "------------------------------------------------------------"
-        log "STEP 6: Creating brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion) [nhp]"
+        log "STEP 6: Creating brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + centroid ROI + 1-voxel erosion) [nhp]"
 
         # 6a. Extract and average the b=0 volumes from the ECC series.
         #     Using mean b=0 (not full ECC mean) gives superior GM/WM/CSF contrast
@@ -494,19 +495,37 @@ else
             -mask_vol \
             -overwrite
 
-        # 6c. Binarize and apply a single-voxel erosion to remove the
-        #     non-brain edge halo that 3dSkullStrip -monkey often leaves.
-        #     This is critical: without erosion, residual dura/CSF/skull edge
-        #     contaminates the mask → bias correction, tensor fit, and FA,
-        #     which then distorts ANTs SyN registration to template space.
-        log " 6c: Binarising and eroding mask (fslmaths -bin -ero)"
-        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -ero \
-            "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
+        # 6c. Auto-detect brain centroid from the skull-strip mask.
+        #     Adapts to each monkey's position/angle (sphinx, ~45° between A/S).
+        log " 6c: Computing brain centroid from skull-strip mask"
+        CENTROID=$(3dCM -all_rois "$TMPDIR/skullstrip_mask.nii.gz" 2>/dev/null | awk 'NR==2{print $1, $2, $3}')
+        # CENTROID format: "x y z" in voxel coords (RPI, 0-indexed)
+        if [[ -z "$CENTROID" ]]; then
+            log " WARNING: 3dCM failed to compute centroid; falling back to simple erosion"
+            fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -ero \
+                "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
+        else
+            # 6d. Create ellipsoid ROI at centroid (radii ~15 for ~30-voxel brain).
+            #     Ellipsoid covers the angled brain better than a sphere; radii can
+            #     be tuned per-study (default: 15 15 15).
+            log " 6d: Creating ellipsoid ROI at centroid $CENTROID (radii 15 15 15)"
+            read CX CY CZ <<< "$CENTROID"
+            3dUndump -dimen 102 82 30 -master "$TMPDIR/ecc_mean_b0.nii.gz" \
+                -srad 15 15 15 -xyz "$CX $CY $CZ" \
+                -prefix "$TMPDIR/brain_roi.nii.gz" -overwrite
+
+            # 6e. Intersect skull-strip mask with ROI (protects superior occipital,
+            #     excludes deep/subcortical false positives), then light erosion.
+            log " 6e: Intersecting mask with ROI and applying light erosion"
+            fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin \
+                -mul "$TMPDIR/brain_roi.nii.gz" \
+                -ero "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
+        fi
 
         mrconvert "$TMPDIR/brain_mask_DWI.nii.gz" "$TMPDIR/brain_mask.mif" -force
         mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
 
-        log " Saved: ${AP_BASE}_mask.nii.gz (mean b=0 + AFNI -monkey skull-strip, -blur_fwhm 2 -no_touchup + 1-voxel erosion)"
+        log " Saved: ${AP_BASE}_mask.nii.gz (mean b=0 + AFNI -monkey -blur_fwhm 2 -no_touchup + centroid ROI + 1-voxel erosion)"
         log " QC: inspect $TMPDIR/ecc_mean_b0.nii.gz and ${AP_BASE}_mask.nii.gz"
 
     else
@@ -663,7 +682,7 @@ log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
 log "   ${AP_BASE}_ECC.bval     b-values"
 if [[ "$SPECIES" = "nhp" ]]; then
-    log "   ${AP_BASE}_mask.nii.gz  brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion)"
+    log "   ${AP_BASE}_mask.nii.gz  brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + centroid ROI + 1-voxel erosion)"
 else
     log "   ${AP_BASE}_mask.nii.gz  brain mask (MRtrix3 dwi2mask)"
 fi
