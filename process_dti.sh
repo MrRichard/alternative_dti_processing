@@ -508,9 +508,10 @@ else
             # 6d. Create ellipsoid ROI at centroid (radii ~15 for ~30-voxel brain).
             #     Ellipsoid covers the angled brain better than a sphere; radii can
             #     be tuned per-study (default: 15 15 15).
+            #     Using -master (not -dimen) to inherit exact grid from ecc_mean_b0.
             log " 6d: Creating ellipsoid ROI at centroid $CENTROID (radii 15 15 15)"
             read CX CY CZ <<< "$CENTROID"
-            3dUndump -dimen 102 82 30 -master "$TMPDIR/ecc_mean_b0.nii.gz" \
+            3dUndump -master "$TMPDIR/ecc_mean_b0.nii.gz" \
                 -srad 15 15 15 -xyz "$CX $CY $CZ" \
                 -prefix "$TMPDIR/brain_roi.nii.gz" -overwrite
 
