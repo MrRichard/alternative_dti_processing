@@ -24,7 +24,7 @@ warping to a template.
 | 3 | Gibbs-ringing removal | MRtrix3 `mrdegibbs` |
 | 4 | Build SE-EPI b0 pair | MRtrix3 `dwiextract`/`mrcat` |
 | 5 | Topup + eddy correction | FSL via `dwifslpreproc` |
-| 6 | **Brain mask (species-aware)** | `dwi2mask` *(human)* / AFNI `3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + centroid ROI + erosion` *(nhp)* |
+| 6 | **Brain mask (species-aware)** | `dwi2mask` *(human)* / AFNI `3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + erosion` *(nhp)* |
 | 7 | Bias-field correction | `dwibiascorrect fsl` |
 | 8 | Extract b0 + DTI shell | MRtrix3 `dwiextract` |
 | 9 | Tensor fit | MRtrix3 `dwi2tensor` |
@@ -42,10 +42,7 @@ from the `-S` flag:
   volume, AFNI `3dSkullStrip -monkey` extracts the brain (a preset tuned for
   NHP EPI contrast), with -blur_fwhm 2 to stabilise the surface boundary on
   noisy EPI data and -no_touchup to prevent reclaiming non-brain edge voxels.
-  An ellipsoid ROI centered on the mask's centroid (auto-detected per subject)
-  protects the angled superior occipital lobe in sphinx-position brains, while
-  excluding deep/subcortical false positives. A final 1-voxel erosion removes
-  the residual non-brain halo.
+  A final 1-voxel erosion removes the residual non-brain halo.
 
 This single mask then drives bias correction, tensor fitting, and metric
 extraction — there is no separate `bet`/`dwi2mask` call downstream.
@@ -79,7 +76,7 @@ Required:
 
 Optional:
   -S SPEC   Species / masking: 'human' (dwi2mask) or 'nhp'
-            (AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + centroid ROI) [default: human]
+            (AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup) [default: human]
   -f FILE   FA template (NIfTI) → also warp DTI maps to template via ANTs SyN
   -r FLOAT  Total EPI readout time (s)   [default: 0.06 or JSON sidecar]
   -s INT    DTI shell for tensor fitting [default: 1000]

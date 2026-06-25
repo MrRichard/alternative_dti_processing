@@ -53,15 +53,9 @@ data. Instead, a mask was derived directly from the corrected diffusion data:
 2. The mean b=0 volume was skull-stripped with AFNI `3dSkullStrip` using the
    `-monkey` preset, which is tuned for non-human primate EPI contrast
    (`-mask_vol`).
-3. The centroid of the resulting mask was computed automatically (`3dCM`)
-   to adapt to each subject's brain position and angle (e.g., sphinx position,
-   ~45° between anterior and superior).
-4. An ellipsoid ROI (radii ~15 voxels, matching the expected ~30-voxel brain
-   extent) was created at the centroid (`3dUndump`), intersected with the
-   skull-strip mask, and eroded by one voxel (`fslmaths -bin -mul -ero`).
-   This preserves the superior occipital lobe (inside the angled ROI) while
-   excluding deep/subcortical false positives (outside the ROI) and the
-   residual non-brain halo. Surface expansion was controlled with `-blur_fwhm 2`
+3. The resulting mask was binarised and eroded by one voxel (`fslmaths -bin -ero`)
+   to remove a residual non-brain halo (dura/CSF/skull edge) that the `-monkey`
+   preset tends to leave. Surface expansion was controlled with `-blur_fwhm 2`
    (Gaussian blur stabilises the boundary on noisy EPI data) and `-no_touchup`
    (prevents reclaiming non-brain edge voxels at the end of the strip).
 
