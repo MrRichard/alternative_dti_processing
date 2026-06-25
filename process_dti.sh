@@ -509,17 +509,19 @@ else
             #     Ellipsoid covers the angled brain better than a sphere; radii can
             #     be tuned per-study (default: 15 15 15).
             #     Using -master (not -dimen) to inherit exact grid from ecc_mean_b0.
+            #     Output as .nii (not .nii.gz) to force NIfTI format; AFNI ignores
+            #     .gz extension when -master is NIfTI.
             log " 6d: Creating ellipsoid ROI at centroid $CENTROID (radii 15 15 15)"
             read CX CY CZ <<< "$CENTROID"
             3dUndump -master "$TMPDIR/ecc_mean_b0.nii.gz" \
                 -srad 15 15 15 -xyz "$CX $CY $CZ" \
-                -prefix "$TMPDIR/brain_roi.nii.gz" -overwrite
+                -prefix "$TMPDIR/brain_roi.nii" -overwrite
 
             # 6e. Intersect skull-strip mask with ROI (protects superior occipital,
             #     excludes deep/subcortical false positives), then light erosion.
             log " 6e: Intersecting mask with ROI and applying light erosion"
             fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin \
-                -mul "$TMPDIR/brain_roi.nii.gz" \
+                -mul "$TMPDIR/brain_roi.nii" \
                 -ero "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
         fi
 
