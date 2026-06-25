@@ -47,16 +47,17 @@ Reliable brain masking of monkey EPI data could not be achieved with MRtrix3
 `dwi2mask` or FSL `bet`; both produced over- or under-inclusive masks on this
 data. Instead, a mask was derived directly from the corrected diffusion data:
 
-1. The full eddy-corrected series was averaged across all volumes into a single
-   3D volume (FSL `fslmaths -Tmean`), yielding a high-SNR image with clear
-   brain/background contrast.
-2. The mean volume was skull-stripped with AFNI `3dSkullStrip` using the
+1. The eddy-corrected b=0 volumes were extracted and averaged into a single
+   3D volume (`dwiextract -bzero` + `mrmath mean`), yielding a high-SNR image
+   with clear brain/background contrast optimized for EPI.
+2. The mean b=0 volume was skull-stripped with AFNI `3dSkullStrip` using the
    `-monkey` preset, which is tuned for non-human primate EPI contrast
    (`-mask_vol`).
-3. The resulting mask was binarised (`fslmaths -bin`) and used as-is. Surface
-   expansion was controlled with `-blur_fwhm 2` (Gaussian blur stabilises the
-   boundary on noisy EPI data) and `-no_touchup` (prevents reclaiming non-brain
-   edge voxels at the end of the strip).
+3. The resulting mask was binarised and eroded by one voxel (`fslmaths -bin -ero`)
+   to remove a residual non-brain halo (dura/CSF/skull edge) that the `-monkey`
+   preset tends to leave. Surface expansion was controlled with `-blur_fwhm 2`
+   (Gaussian blur stabilises the boundary on noisy EPI data) and `-no_touchup`
+   (prevents reclaiming non-brain edge voxels at the end of the strip).
 
 This single brain mask was used for all subsequent steps (bias-field
 estimation, tensor fitting, and metric extraction). Masks were visually

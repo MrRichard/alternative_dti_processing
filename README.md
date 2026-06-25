@@ -24,7 +24,7 @@ warping to a template.
 | 3 | Gibbs-ringing removal | MRtrix3 `mrdegibbs` |
 | 4 | Build SE-EPI b0 pair | MRtrix3 `dwiextract`/`mrcat` |
 | 5 | Topup + eddy correction | FSL via `dwifslpreproc` |
-| 6 | **Brain mask (species-aware)** | `dwi2mask` *(human)* / AFNI `3dSkullStrip -monkey` *(nhp)* |
+| 6 | **Brain mask (species-aware)** | `dwi2mask` *(human)* / AFNI `3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + erosion` *(nhp)* |
 | 7 | Bias-field correction | `dwibiascorrect fsl` |
 | 8 | Extract b0 + DTI shell | MRtrix3 `dwiextract` |
 | 9 | Tensor fit | MRtrix3 `dwi2tensor` |
@@ -38,10 +38,11 @@ both proved unreliable. The pipeline therefore selects the masking strategy
 from the `-S` flag:
 
 - **`-S human`** (default): MRtrix3 `dwi2mask` on the preprocessed DWI.
-- **`-S nhp`**: FSL averages the full eddy-corrected (ECC) series into one
+- **`-S nhp`**: FSL averages the b=0 volumes from the eddy-corrected series into one
   volume, AFNI `3dSkullStrip -monkey` extracts the brain (a preset tuned for
   NHP EPI contrast), with -blur_fwhm 2 to stabilise the surface boundary on
   noisy EPI data and -no_touchup to prevent reclaiming non-brain edge voxels.
+  A final 1-voxel erosion removes the residual non-brain halo.
 
 This single mask then drives bias correction, tensor fitting, and metric
 extraction — there is no separate `bet`/`dwi2mask` call downstream.

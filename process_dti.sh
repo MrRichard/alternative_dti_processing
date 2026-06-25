@@ -6,9 +6,9 @@
 #
 # Species-aware brain masking (-S flag):
 #   -S human  (default) — MRtrix3 dwi2mask on the preprocessed DWI
-#   -S nhp              — FSL mean of the ECC series, then AFNI 3dSkullStrip
-#                         with the -monkey preset, -blur_fwhm 2, and
-#                         -no_touchup. Use this for non-human primate / monkey
+#   -S nhp              — mean b=0 from ECC series, then AFNI 3dSkullStrip
+#                         with the -monkey preset, -blur_fwhm 2, -no_touchup,
+#                         and 1-voxel erosion. Use this for non-human primate / monkey
 #                         data, where dwi2mask and BET are unreliable.
 #
 # Optional template normalisation (-f flag):
@@ -69,7 +69,7 @@ Required:
 Optional:
   -S SPEC   Species / masking strategy: 'human' or 'nhp' [default: human]
               human — MRtrix3 dwi2mask
-              nhp   — FSL mean + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup
+              nhp   — FSL mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion
                       (recommended for monkey/NHP data)
   -f FILE   FA template (NIfTI). If given, native DTI maps are additionally
             warped to this template with ANTs SyN (any species).
@@ -461,26 +461,32 @@ else
     # -----------------------------------------------------------------------
     if [[ "$SPECIES" = "nhp" ]]; then
 
-        # NHP: FSL averages the full ECC series, AFNI 3dSkullStrip extracts the
-        # brain with its -monkey preset (tuned for NHP EPI contrast). Blurring
-        # (-blur_fwhm 2) stabilises the surface boundary on the EPI mean, and
-        # -no_touchup prevents reclaiming non-brain edge voxels. dwi2mask and
-        # FSL BET have both proven unreliable on this data, so AFNI is used.
+    # NHP: mean b=0 from ECC series, AFNI 3dSkullStrip extracts the
+    # brain with its -monkey preset (tuned for NHP EPI contrast). Blurring
+    # (-blur_fwhm 2) stabilises the surface boundary, -no_touchup prevents
+    # reclaiming non-brain edge voxels, and a 1-voxel erosion removes the
+    # residual non-brain halo. dwi2mask and FSL BET have both proven
+    # unreliable on this data, so AFNI is used.
         log "------------------------------------------------------------"
-        log "STEP 6: Creating brain mask (FSL mean + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup) [nhp]"
+        log "STEP 6: Creating brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion) [nhp]"
 
-        # 6a. Average the eddy-corrected DWI series into a single 3D volume (FSL).
-        log " 6a: Averaging ECC series with fslmaths -Tmean"
-        fslmaths "$OUTDIR/${AP_BASE}_ECC.nii.gz" -Tmean "$TMPDIR/ecc_mean.nii.gz"
+        # 6a. Extract and average the b=0 volumes from the ECC series.
+        #     Using mean b=0 (not full ECC mean) gives superior GM/WM/CSF contrast
+        #     for skull-stripping on NHP EPI data.
+        log " 6a: Extracting and averaging b=0 volumes from ECC series"
+        dwiextract -bzero "$TMPDIR/ap_preproc.mif" - | \
+            mrmath - mean -axis 3 "$TMPDIR/ecc_mean_b0.nii.gz" -force
 
-        # 6b. Skull-strip the mean volume with AFNI (-monkey preset for NHP EPI).
-        #     -blur_fwhm 2 stabilises the surface on noisy EPI data.
+        # 6b. Skull-strip the mean b=0 with AFNI (-monkey preset for NHP EPI).
+        #     -blur_fwhm 2 stabilises the surface boundary on noisy EPI data.
         #     -no_touchup prevents reclaiming non-brain edge voxels at the end.
-        #     -mask_vol (no argument) emits a mask volume rather than the
-        #     extracted brain.
+        #     -mask_vol emits a binary mask volume.
+        #     NOTE: Rhesus ECC images are ~102x82x30 (RPI), brain occupies ~30x30x30
+        #     voxels in sphinx position (angled between A and S). The -monkey preset
+        #     is tuned for this contrast but tends to leave a 1-voxel non-brain halo.
         log " 6b: Running AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup"
         3dSkullStrip \
-            -input  "$TMPDIR/ecc_mean.nii.gz" \
+            -input  "$TMPDIR/ecc_mean_b0.nii.gz" \
             -prefix "$TMPDIR/skullstrip_mask.nii.gz" \
             -monkey \
             -blur_fwhm 2 \
@@ -488,18 +494,20 @@ else
             -mask_vol \
             -overwrite
 
-        # 6c. Binarize the raw skull-strip mask (no dilation/erosion). NOTE:
-        #     fslmaths cannot write MRtrix .mif — keep this output as NIfTI,
-        #     then import.
-        log " 6c: Binarising mask (fslmaths -bin)"
-        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin \
+        # 6c. Binarize and apply a single-voxel erosion to remove the
+        #     non-brain edge halo that 3dSkullStrip -monkey often leaves.
+        #     This is critical: without erosion, residual dura/CSF/skull edge
+        #     contaminates the mask → bias correction, tensor fit, and FA,
+        #     which then distorts ANTs SyN registration to template space.
+        log " 6c: Binarising and eroding mask (fslmaths -bin -ero)"
+        fslmaths "$TMPDIR/skullstrip_mask.nii.gz" -bin -ero \
             "$TMPDIR/brain_mask_DWI.nii.gz" -odt char
 
         mrconvert "$TMPDIR/brain_mask_DWI.nii.gz" "$TMPDIR/brain_mask.mif" -force
         mrconvert "$TMPDIR/brain_mask.mif" "$OUTDIR/${AP_BASE}_mask.nii.gz" -force
 
-        log " Saved: ${AP_BASE}_mask.nii.gz (AFNI -monkey skull-strip, -blur_fwhm 2 -no_touchup)"
-        log " QC: inspect $TMPDIR/ecc_mean.nii.gz and ${AP_BASE}_mask.nii.gz"
+        log " Saved: ${AP_BASE}_mask.nii.gz (mean b=0 + AFNI -monkey skull-strip, -blur_fwhm 2 -no_touchup + 1-voxel erosion)"
+        log " QC: inspect $TMPDIR/ecc_mean_b0.nii.gz and ${AP_BASE}_mask.nii.gz"
 
     else
 
@@ -655,7 +663,7 @@ log "   ${AP_BASE}_ECC.nii.gz   eddy-corrected DWI (all shells)"
 log "   ${AP_BASE}_ECC.bvec     eddy-rotated gradient directions"
 log "   ${AP_BASE}_ECC.bval     b-values"
 if [[ "$SPECIES" = "nhp" ]]; then
-    log "   ${AP_BASE}_mask.nii.gz  brain mask (AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup)"
+    log "   ${AP_BASE}_mask.nii.gz  brain mask (mean b=0 + AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion)"
 else
     log "   ${AP_BASE}_mask.nii.gz  brain mask (MRtrix3 dwi2mask)"
 fi
