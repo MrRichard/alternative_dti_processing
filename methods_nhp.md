@@ -24,22 +24,42 @@ manually.
 
 ## Preprocessing
 
-1. **Denoising.** Thermal noise was removed from the raw AP series using
-   Marchenko–Pastur PCA denoising (`dwidenoise`; Veraart et al., 2016), applied
-   before any other spatial operation.
+### 1. Denoising
 
-2. **Gibbs-ringing removal.** Gibbs ringing artifacts were suppressed using the
-   local subvoxel-shifts method (`mrdegibbs`; Kellner et al., 2016).
+Thermal noise was removed from the raw AP series using Marchenko–Pastur PCA
+denoising (`dwidenoise`; Veraart et al., 2016), applied before any other spatial
+operation. This step reduces noise variance while preserving spatial resolution
+and is a prerequisite for downstream operations.
 
-3. **Susceptibility and eddy-current correction.** An SE-EPI b0 pair was
-   assembled from the mean AP b0 (after denoising and Gibbs correction) and the
-   mean PA b0 volume. Susceptibility-induced distortions, eddy-current
-   distortions, and inter-volume head motion were corrected jointly using FSL
-   `topup` and `eddy` (Andersson & Sotiropoulos, 2016) orchestrated by the
-   MRtrix3 wrapper `dwifslpreproc` (`-rpe_pair`, `-pe_dir AP`,
-   `--slm=linear --data_is_shelled`). Diffusion gradient directions were rotated
-   to follow the motion correction. The corrected multi-shell series (ECC) was
-   retained with its rotated gradient table.
+### 2. Gibbs-ringing removal
+
+Gibbs ringing artifacts were suppressed using the local subvoxel-shifts method
+(`mrdegibbs`; Kellner et al., 2016). These artifacts appear as bright/dark
+stripes at sharp intensity transitions (e.g., brain–skull boundaries) and are
+especially prominent in high-resolution EPI. Removal improves boundary
+definition for subsequent masking.
+
+### 3. Susceptibility and eddy-current correction
+
+An SE-EPI b0 pair was assembled from the mean AP b0 (after denoising and Gibbs
+correction) and the mean PA b0 volume. Susceptibility-induced distortions,
+eddy-current distortions, and inter-volume head motion were corrected jointly
+using FSL `topup` and `eddy` (Andersson & Sotiropoulos, 2016) orchestrated by
+the MRtrix3 wrapper `dwifslpreproc` (`-rpe_pair`, `-pe_dir AP`,
+`--slm=linear --data_is_shelled`). Diffusion gradient directions were rotated
+to follow the motion correction. The corrected multi-shell series (ECC) was
+retained with its rotated gradient table.
+
+#### Tools and parameters
+- **FSL topup**: Estimates the fieldmap from the SE-EPI b0 pair, models
+  susceptibility-induced distortions as a linear phase-encode-dependent
+  warping field, and applies the inverse transform.
+- **FSL eddy**: Models eddy currents, inter-volume motion, and outliers using a
+  multivariate linear model (`--slm=linear`) and accounts for the fact that
+  the data contain multiple distinct shells (`--data_is_shelled`).
+- **Gradient rotation**: Eddy corrections rotate b-vectors to compensate for
+  rigid-body motion, ensuring that gradient directions remain consistent
+  relative to the specimen's anatomy.
 
 ## Brain extraction (NHP-specific)
 
@@ -64,19 +84,39 @@ estimation, tensor fitting, and metric extraction). Masks were visually
 inspected; where necessary a corrected mask was supplied and the pipeline
 resumed from bias correction onward.
 
+### AFNI 3dSkullStrip parameters for NHP
+- `-monkey`: Preset tuned for rhesus macaque EPI contrast (darker brain, brighter
+  background).
+- `-blur_fwhm 2`: Gaussian blur (2 mm FWHM) stabilises the surface boundary,
+  particularly important for noisy EPI where edge detection can be unstable.
+- `-no_touchup`: Prevents AFNI from attempting to reclaim edge voxels that are
+  likely non-brain; this is critical for NHP data, where the preset tends to
+  leave a one-voxel halo that must be removed by erosion rather than reclaimed.
+- `-mask_vol`: Emits a binary mask volume in addition to the skull-stripped image.
+
 ## Tensor estimation
 
-4. **Bias-field correction.** Low-frequency intensity inhomogeneity was
-   corrected within the brain mask using `dwibiascorrect fsl`
-   (FSL FAST; Zhang et al., 2001).
+### 4. Bias-field correction
 
-5. **Shell selection and tensor fit.** The b = 0 and b = 1000 s/mm² volumes were
-   extracted (`dwiextract`) and the diffusion tensor was fitted by iteratively
-   reweighted linear least squares within the brain mask (`dwi2tensor`).
+Low-frequency intensity inhomogeneity was corrected within the brain mask using
+`dwibiascorrect fsl` (FSL FAST; Zhang et al., 2001). N4 contrast was not
+available in the container build; FSL FAST provides adequate correction for
+DTI metric extraction.
 
-6. **Scalar maps.** Fractional anisotropy (FA), mean diffusivity (MD), axial
-   diffusivity (AD), and radial diffusivity (RD) were computed from the tensor
-   (`tensor2metric`) in native diffusion space.
+### 5. Shell selection and tensor fit
+
+The b = 0 and b = 1000 s/mm² volumes were extracted (`dwiextract`) and the
+diffusion tensor was fitted by iteratively reweighted linear least squares
+within the brain mask (`dwi2tensor`). The multi-shell data (b = 0, 500, 1000,
+2000) were acquired for potential advanced modeling (NODDI, SMT, MSMT-CSD), but
+standard DTI tensor fitting uses only b = 0 + b = 1000, which is the clinical
+standard.
+
+### 6. Scalar maps
+
+Fractional anisotropy (FA), mean diffusivity (MD), axial diffusivity (AD), and
+radial diffusivity (RD) were computed from the tensor (`tensor2metric`) in
+native diffusion space.
 
 ## Optional template normalization
 

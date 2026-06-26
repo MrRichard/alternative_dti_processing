@@ -1,4 +1,4 @@
-# Alternative DTI Processing
+# Alternative DTI Processing Pipeline
 
 A containerized diffusion tensor imaging (DTI) preprocessing and tensor-fitting
 pipeline for multi-shell AP/PA acquisitions, with **species-aware brain
@@ -40,8 +40,8 @@ from the `-S` flag:
 - **`-S human`** (default): MRtrix3 `dwi2mask` on the preprocessed DWI.
 - **`-S nhp`**: FSL averages the b=0 volumes from the eddy-corrected series into one
   volume, AFNI `3dSkullStrip -monkey` extracts the brain (a preset tuned for
-  NHP EPI contrast), with -blur_fwhm 2 to stabilise the surface boundary on
-  noisy EPI data and -no_touchup to prevent reclaiming non-brain edge voxels.
+  NHP EPI contrast), with `-blur_fwhm 2` to stabilise the surface boundary on
+  noisy EPI data and `-no_touchup` to prevent reclaiming non-brain edge voxels.
   A final 1-voxel erosion removes the residual non-brain halo.
 
 This single mask then drives bias correction, tensor fitting, and metric
@@ -64,78 +64,107 @@ the ANTs release, so allow 20–30 minutes and a working network connection.
 
 ## Usage
 
-```text
-process_dti.sh [OPTIONS]
+### Command-line invocation (inside the container)
 
-Required:
-  -a FILE   AP-encoded DWI series (NIfTI)
-  -v FILE   AP bvec file
-  -b FILE   AP bval file
-  -p FILE   PA-encoded b0 series for topup correction (NIfTI)
-  -o DIR    Output directory (created if needed)
-
-Optional:
-  -S SPEC   Species / masking: 'human' (dwi2mask) or 'nhp'
-            (AFNI 3dSkullStrip -monkey -blur_fwhm 2 -no_touchup) [default: human]
-  -f FILE   FA template (NIfTI) → also warp DTI maps to template via ANTs SyN
-  -r FLOAT  Total EPI readout time (s)   [default: 0.06 or JSON sidecar]
-  -s INT    DTI shell for tensor fitting [default: 1000]
-  -c FILE   Pre-made brain mask (NIfTI) → resume from bias correction onward
-  -k        Keep intermediate files in <outdir>/tmp/
-  -h        Help
-```
-
-> **Invocation forms.** The container's `run` action defaults to `process_dti.sh`, so
-> `apptainer run <sif> -a ... -S nhp` (arguments only, no script path) runs the pipeline.
-> The examples below use the explicit `apptainer exec <sif> /app/process_dti.sh ...` form.
-> Do **not** combine them as `apptainer run <sif> /app/process_dti.sh ...` — the script
-> path would be passed to the script as an argument and option parsing would fail.
-
-### Human data
+The script is invoked with a single `srun` command. Here is an example invocation
+for a monkey subject using a single node with the default partition:
 
 ```bash
-apptainer exec \
-  -B /data/study:/data -B /data/out:/out \
+srun -p defq -A ansir-users singularity exec \
+  -B ./sample_input_data/sample_nifti_data/:/input \
+  -B /isilon/datalake/cam_can_meg/original/TrainingLabResources/sample_output_data/:/output \
+  -B /isilon/datalake/cam_can_meg/original/TrainingLabResources/template_resources/UWDTIRhesusWMAtlas:/templates \
+  alternative_dti_processing/alternative_dti_processing.sif \
+  alternative_dti_processing/process_dti.sh \
+  -a /input/NHP_1484_20230713_ed2d_diff_wfu_DTI_30dir_iPAT4_AP_20230713074902_17.nii \
+  -v /input/NHP_1484_20230713_ed2d_diff_wfu_DTI_30dir_iPAT4_AP_20230713074902_17.bvec \
+  -b /input/NHP_1484_20230713_ed2d_diff_wfu_DTI_30dir_iPAT4_AP_20230713074902_17.bval \
+  -p /input/NHP_1484_20230713_ed2d_diff_wfu_DTI_30dir_iPAT4_PA_20230713074902_11.nii \
+  -o /output/NHP_1484_20230713/ \
+  -S nhp \
+  -f /templates/DTIPaxFA.nii.gz
+```
+
+#### Input path mapping
+
+- **Input data**: Map your DICOM or NIfTI input directory to `/input` inside the container.
+- **Output data**: Map your output directory to `/output` inside the container.
+- **Template data**: Map template resources (FA template, atlases) to `/templates` inside the container.
+
+#### Required arguments
+
+| Flag | Description |
+|------|-------------|
+| `-a FILE` | AP-encoded DWI series (NIfTI) |
+| `-v FILE` | AP bvec file |
+| `-b FILE` | AP bval file |
+| `-p FILE` | PA-encoded b0 series for topup correction (NIfTI) |
+| `-o DIR`  | Output directory (created if it does not exist) |
+
+#### Optional arguments
+
+| Flag | Description |
+|------|-------------|
+| `-S SPEC` | Species / masking strategy: `human` (default) or `nhp` (AFNI `-monkey` masking) |
+| `-f FILE` | FA template (NIfTI) → warp DTI maps to template via ANTs SyN |
+| `-r FLOAT` | Total EPI readout time in seconds [default: 0.06, auto-read from JSON sidecar] |
+| `-s INT` | B-value shell for tensor fitting [default: 1000; use 2000 for high-b DTI] |
+| `-c FILE` | Pre-made brain mask (NIfTI) → resume from bias correction onward |
+| `-k` | Keep intermediate files in `<outdir>/tmp/` (default: delete) |
+| `-h` | Show this help message |
+
+#### Example invocations
+
+##### Human data (default masking)
+
+```bash
+srun -p defq -A ansir-users singularity exec \
+  -B /data/study:/input \
+  -B /data/out:/output \
   alternative_dti_processing.sif \
-  /app/process_dti.sh \
-      -a /data/sub-01_AP.nii.gz \
-      -v /data/sub-01_AP.bvec \
-      -b /data/sub-01_AP.bval \
-      -p /data/sub-01_PA.nii.gz \
-      -o /out/sub-01
+  alternative_dti_processing/process_dti.sh \
+  -a /input/sub-01_AP.nii.gz \
+  -v /input/sub-01_AP.bvec \
+  -b /input/sub-01_AP.bval \
+  -p /input/sub-01_PA.nii.gz \
+  -o /output/sub-01
 ```
 
-### Monkey / NHP data (AFNI `-monkey` masking)
+##### Monkey / NHP data (AFNI `-monkey` masking)
 
 ```bash
-apptainer exec \
-  -B /data/nhp_study:/data -B /data/out:/out \
+srun -p defq -A ansir-users singularity exec \
+  -B /data/nhp_study:/input \
+  -B /data/out:/output \
+  -B /templates:/templates \
   alternative_dti_processing.sif \
-  /app/process_dti.sh \
-      -a /data/monkey01_AP.nii.gz \
-      -v /data/monkey01_AP.bvec \
-      -b /data/monkey01_AP.bval \
-      -p /data/monkey01_PA.nii.gz \
-      -o /out/monkey01 \
-      -S nhp
+  alternative_dti_processing/process_dti.sh \
+  -a /input/NHP_001_AP.nii.gz \
+  -v /input/NHP_001_AP.bvec \
+  -b /input/NHP_001_AP.bval \
+  -p /input/NHP_001_PA.nii.gz \
+  -o /output/NHP_001 \
+  -S nhp \
+  -f /templates/DTIPaxFA.nii.gz
 ```
 
-### Optional: warp DTI maps to an FA template
+##### Resuming with a hand-edited mask
 
-Add `-f /data/FA_template.nii.gz` to either invocation. After fitting the
-native maps, the pipeline registers native FA → template with ANTs SyN and
-applies the composite warp to all four metrics, producing
-`w<base>_ECC_{FA,MD,AD,RD}.nii.gz`.
-
-### Resuming with a hand-edited mask
-
-If an auto-generated mask needs manual correction, edit
-`<outdir>/<base>_mask.nii.gz` (or supply your own in the same space/resolution
-as `<base>_ECC.nii.gz`) and rerun with `-c`:
+If an auto-generated mask needs manual correction, edit the mask file and rerun with `-c`:
 
 ```bash
-/app/process_dti.sh -a ... -v ... -b ... -p ... -o /out/monkey01 \
-    -c /out/monkey01/monkey01_AP_mask_edited.nii.gz
+srun -p defq -A ansir-users singularity exec \
+  -B /data/nhp_study:/input \
+  -B /data/out:/output \
+  alternative_dti_processing.sif \
+  alternative_dti_processing/process_dti.sh \
+  -a /input/NHP_001_AP.nii.gz \
+  -v /input/NHP_001_AP.bvec \
+  -b /input/NHP_001_AP.bval \
+  -p /input/NHP_001_PA.nii.gz \
+  -o /output/NHP_001 \
+  -c /output/NHP_001/NHP_001_AP_mask_edited.nii.gz \
+  -S nhp
 ```
 
 This re-imports the existing ECC output and your mask and resumes from bias
@@ -155,17 +184,67 @@ correction onward, skipping topup/eddy and auto-masking.
 
 ---
 
-## Notes
+## Pipeline steps (detailed overview)
 
-- **Multi-shell data** (b = 0, 500, 1000, 2000): the tensor is fitted on
-  b=0 + b=1000 by default (`-s 2000` to use the high shell). The full
-  preprocessed series is preserved for advanced models (NODDI, SMT, MSMT-CSD).
-- **Phase-encode direction**: STEP 5 assumes AP = `j-` (`-pe_dir AP`). Verify
-  with `mrinfo` / your protocol; flip if your AP is actually posterior→anterior.
-- **Readout time**: auto-read from the AP JSON sidecar (`TotalReadoutTime`) when
-  present; override with `-r`.
+1. **Input conversion**: Raw NIfTI images are converted to MRtrix3 `.mif` format.
+2. **Denoising**: Marchenko–Pastur PCA denoising (`dwidenoise`) applied before any spatial operation.
+3. **Gibbs ringing removal**: Local subvoxel-shifts method (`mrdegibbs`) suppresses ringing artifacts.
+4. **SE-EPI b0 pair**: Mean b=0 from AP and PA series are concatenated for topup.
+5. **Distortion & eddy correction**: FSL `topup` + `eddy` via `dwifslpreproc` with `-rpe_pair`.
+6. **Brain masking**:
+   - Human: MRtrix3 `dwi2mask` on the preprocessed DWI.
+   - NHP: FSL mean b=0 + AFNI `3dSkullStrip -monkey -blur_fwhm 2 -no_touchup + 1-voxel erosion`.
+7. **Bias-field correction**: FSL FAST (`dwibiascorrect fsl`) within the brain mask.
+8. **Shell selection**: `dwiextract` isolates b=0 + chosen DTI shell (default b=1000).
+9. **Tensor fitting**: MRtrix3 `dwi2tensor` with iteratively reweighted linear least squares.
+10. **Metric extraction**: `tensor2metric` produces FA, MD, AD, RD maps.
+11. **Template normalization** *(optional, `-f`)*: ANTs SyN registers native FA → template; composite transform warps all four metrics.
+
+---
+
+## Multi-shell data notes
+
+The pipeline supports multi-shell acquisitions (b = 0, 500, 1000, 2000 s/mm²):
+
+- **Tensor fitting**: Uses b=0 + b=1000 by default (`-s 2000` for high-b DTI).
+- **Full series**: The preprocessed ECC series is retained for advanced models:
+  - NODDI, SMT, MSMT-CSD
+  - Q-ball or CSD on individual shells
+  - Hybrid models combining multiple shells
+
+---
+
+## Phase-encode direction
+
+Step 5 assumes AP = `j-` (`-pe_dir AP`). Verify your phase-encode direction with
+`mrinfo` or your scanner protocol sheet. If your AP series is actually
+posterior→anterior, change `-pe_dir PA`.
+
+---
+
+## Readout time
+
+The pipeline reads `TotalReadoutTime` from the AP JSON sidecar automatically when
+present; override with `-r` if your JSON is missing or the field is misconfigured.
+
+Derivation: `EffectiveEchoSpacing_s * (PhaseEncodeLines - 1)`
+
+Check your DICOM header or scanner protocol sheet for the correct value.
+
+---
+
+## Re-running after container rebuild
+
+If you rebuild the SIF file to update the pipeline, simply re-run the same
+`srun` command — no changes to the invocation are required.
+
+To force recomputation of the slow topup/eddy steps, delete the
+`<outdir>/*_ECC.*` files or point `-o` at a fresh directory.
+
+---
 
 ## Documentation
 
 - [`methods_nhp.md`](methods_nhp.md) — methods-section write-up of the NHP pipeline.
 - [`NHP_DTI_Pipeline_Guide.md`](NHP_DTI_Pipeline_Guide.md) — step-by-step student guide.
+- [`FuturePlans.md`](FuturePlans.md) — outline for batch-processing infrastructure.
